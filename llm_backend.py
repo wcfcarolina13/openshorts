@@ -144,7 +144,13 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         text = msg.get("content") or ""
         if isinstance(text, list):  # some servers return content parts
             text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-    parsed = gemini_worker._parse_json_response_text(text)
+    try:
+        parsed = gemini_worker._parse_json_response_text(text)
+    except Exception:
+        # Local debugging (2026-09-06): show what the model actually returned.
+        print(f"⚠️ LLM raw content (first 600 chars): {text[:600]!r}")
+        print(f"⚠️ LLM reasoning present: {bool((choices[0].get('message') or {}).get('reasoning'))}, finish_reason={choices[0].get('finish_reason')}")
+        raise
     # Validate against the same schema Gemini enforces server-side, so a
     # local model that drops a field fails here with a readable error
     # (retried by the caller) instead of deep inside the clip pipeline.

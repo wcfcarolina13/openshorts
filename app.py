@@ -1664,10 +1664,15 @@ import mcp_server as _mcp_server
 app.include_router(_mcp_server.router)
 
 # Enable CORS for frontend. Cloud mode locks this down to the configured origins;
-# self-host keeps the permissive wildcard it has always used.
+# self-host reads SELF_HOST_ALLOWED_ORIGINS (comma-separated) and otherwise
+# allows only the local dashboard, so an arbitrary website open in the browser
+# cannot drive the unauthenticated API. (Local hardening, 2026-09-06.)
+_SELF_HOST_ORIGINS = [o.strip() for o in os.environ.get(
+    "SELF_HOST_ALLOWED_ORIGINS",
+    "http://localhost:5175,http://127.0.0.1:5175").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cloud.settings.allowed_origins if BILLING_ENABLED else ["*"],
+    allow_origins=cloud.settings.allowed_origins if BILLING_ENABLED else _SELF_HOST_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

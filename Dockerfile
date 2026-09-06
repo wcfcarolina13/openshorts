@@ -58,7 +58,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 
 # Helper token provider, baked in as a local Node script (no separate service).
-RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-provider \
+RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-provider \
+    && git -C /opt/bgutil-provider checkout --quiet d36dac9b8ca458ee440f5885864e8bffce46efbf \
     && cd /opt/bgutil-provider/server \
     && npm install --no-audit --no-fund \
     && npx tsc \
@@ -78,7 +79,7 @@ ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:/op
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
 # Latest yt-dlp (nightly — it updates frequently) plus its helper plugin.
-RUN pip install --upgrade --pre --no-cache-dir "yt-dlp[default]" bgutil-ytdlp-pot-provider
+RUN pip install --pre --no-cache-dir "yt-dlp[default]==2026.8.30.232658.dev0" "bgutil-ytdlp-pot-provider==1.3.2"
 
 # Copy application code
 COPY . .
