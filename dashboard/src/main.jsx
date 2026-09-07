@@ -10,6 +10,7 @@ import PricingPage from './components/PricingPage'
 import AccountPage from './components/AccountPage'
 import LoginModal from './components/LoginModal'
 import OAuthConsent from './components/OAuthConsent'
+import ErrorBoundary from './components/ErrorBoundary'
 
 function PageShell({ title, children }) {
   return (
@@ -114,8 +115,10 @@ captureAttribution();
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <AuthProvider>
-      <Root />
-    </AuthProvider>
+    <ErrorBoundary where="the dashboard">
+      <AuthProvider>
+        <Root />
+      </AuthProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )

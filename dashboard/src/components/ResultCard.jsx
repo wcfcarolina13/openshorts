@@ -4,6 +4,7 @@ import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import SubtitleModal from './SubtitleModal';
 import VersionsModal from './VersionsModal';
+import ErrorBoundary from './ErrorBoundary';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
@@ -1169,6 +1170,7 @@ export default function ResultCard({ onTimelineEdit, onClipRerendered, clip, ind
                 </div>
             </Modal>
 
+            <ErrorBoundary where="version history" inline onDismiss={() => setShowVersions(false)}>
             <VersionsModal
                 isOpen={showVersions}
                 onClose={() => setShowVersions(false)}
@@ -1183,6 +1185,7 @@ export default function ResultCard({ onTimelineEdit, onClipRerendered, clip, ind
                     onClipRerendered?.(index, data);
                 }}
             />
+            </ErrorBoundary>
             <SubtitleModal
                 isOpen={showSubtitleModal}
                 onClose={() => setShowSubtitleModal(false)}

@@ -12,6 +12,7 @@ import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
 import TimelineEditsModal from './components/TimelineEditsModal';
+import ErrorBoundary from './components/ErrorBoundary';
 import RecentProjects from './components/RecentProjects';
 import { getApiUrl } from './config';
 import ReframeEditor from './components/ReframeEditor';
@@ -2157,15 +2158,17 @@ function App() {
         />
       )}
       {timelineClip !== null && results?.clips?.[timelineClip] && (
-        <TimelineEditsModal
-          isOpen
-          jobId={jobId}
-          clipIndex={timelineClip}
-          clipTitle={results.clips[timelineClip].video_title_for_youtube_short || ''}
-          videoUrl={getApiUrl(results.clips[timelineClip].video_url)}
-          onClose={() => setTimelineClip(null)}
-          onRerendered={handleClipRerendered}
-        />
+        <ErrorBoundary where="timeline edits" inline onDismiss={() => setTimelineClip(null)}>
+          <TimelineEditsModal
+            isOpen
+            jobId={jobId}
+            clipIndex={timelineClip}
+            clipTitle={results.clips[timelineClip].video_title_for_youtube_short || ''}
+            videoUrl={getApiUrl(results.clips[timelineClip].video_url)}
+            onClose={() => setTimelineClip(null)}
+            onRerendered={handleClipRerendered}
+          />
+        </ErrorBoundary>
       )}
       {reframingClip !== null && results?.clips?.[reframingClip] && (
         <ReframeEditor
