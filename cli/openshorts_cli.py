@@ -51,6 +51,27 @@ def _request(method, path, body=None):
         sys.exit(2)
 
 
+def _put_bytes(path, data, content_type):
+    """Raw-body PUT (asset uploads); same auth and error shape as _request."""
+    headers = {"Accept": "application/json", "Content-Type": content_type}
+    key = os.environ.get("OPENSHORTS_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(_base() + path, data=data, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode() or "{}")
+        except Exception:
+            payload = {"detail": str(e.reason)}
+        return e.code, payload
+    except urllib.error.URLError as e:
+        print(f"error: cannot reach {_base()} ({e.reason})", file=sys.stderr)
+        sys.exit(1)
+
+
 def _die(status, payload):
     detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
     if not isinstance(detail, str):
@@ -188,6 +209,34 @@ def cmd_publish(args):
     print(json.dumps(payload) if args.json else f"publishing: {payload}")
 
 
+_ASSET_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4",
+                ".mov": "video/quicktime"}
+
+
+def cmd_recut(args):
+    """Upload any --asset files, then post the edit list as the clip's recipe.
+
+    The edit list is the recipe segment list from the timeline-edits spec:
+    {start,end[,speed]} source ranges plus {kind: hold|image|clip} entries."""
+    for asset in args.asset or []:
+        name = os.path.basename(asset)
+        ctype = _ASSET_TYPES.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+        with open(asset, "rb") as f:
+            status, payload = _put_bytes(f"/api/jobs/{args.job_id}/assets/{name}", f.read(), ctype)
+        if status >= 400:
+            _die(status, payload)
+    with open(args.edl) as f:
+        edl = json.load(f)
+    segments = edl["segments"] if isinstance(edl, dict) else edl
+    body = {"job_id": args.job_id, "clip_index": args.clip_index,
+            "segments": segments, "reapply_captions": not args.no_captions}
+    status, payload = _request("POST", "/api/clip/rerender", body)
+    if status >= 400:
+        _die(status, payload)
+    print(json.dumps(payload) if args.json else f"rerendered: {payload.get('video_url', payload)}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="openshorts",
@@ -225,6 +274,14 @@ def main(argv=None):
     p.add_argument("--schedule", help="ISO datetime for scheduled posting")
     p.add_argument("--timezone", help="IANA timezone for --schedule")
     p.set_defaults(func=cmd_publish)
+
+    p = sub.add_parser("recut", help="re-render one clip from a JSON edit list (holds, slow-downs, image/clip inserts)")
+    p.add_argument("job_id")
+    p.add_argument("clip_index", type=int)
+    p.add_argument("--edl", required=True, help='JSON file: {"segments": [...]} or a bare list')
+    p.add_argument("--asset", action="append", help="media file to upload first (repeatable)")
+    p.add_argument("--no-captions", action="store_true", help="skip re-burning captions")
+    p.set_defaults(func=cmd_recut)
 
     args = parser.parse_args(argv)
     args.func(args)
