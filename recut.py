@@ -29,9 +29,19 @@ from ffmpeg_utils import (METADATA_SCRUB, QUALITY_FAST, audio_encode_args,
 
 # EDL limits. Deliberately generous — the editor is for humans fixing cuts,
 # not for stitching feature films.
-MAX_SEGMENTS = 12
+MAX_SEGMENTS = 24
 MIN_SEGMENT_SECONDS = 0.5
 MAX_TOTAL_SECONDS = 180.0
+
+# Segment kinds. "source" is the implicit kind of a plain {start, end} entry;
+# the others are timeline edits (see docs/superpowers/specs/2026-09-06-timeline-edits-design.md).
+KINDS = ("source", "hold", "image", "clip")
+SPEED_MIN, SPEED_MAX = 0.25, 4.0
+HOLD_MS_MIN, HOLD_MS_MAX = 40, 3000
+IMAGE_MS_MIN, IMAGE_MS_MAX = 200, 10000
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+VIDEO_EXTENSIONS = {".mp4", ".mov"}
+ASSET_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
 # Segments may start/end a hair outside the canonical range through float
 # round-tripping; treat them as inside.
@@ -42,11 +52,79 @@ class RecutError(ValueError):
     """Invalid EDL — safe to surface verbatim as a 400 detail."""
 
 
-def normalize_segments(segments, source_duration=None):
-    """Validate and clamp an EDL. Returns [{'start': float, 'end': float}, ...].
+def segment_kind(seg):
+    return str((seg or {}).get("kind") or "source")
 
-    Order is preserved — the segment order IS the clip order, and reusing a
-    source range twice is legal (an echo/replay is a real editing move).
+
+def segment_duration(seg):
+    """Seconds this segment occupies on the OUTPUT timeline."""
+    kind = segment_kind(seg)
+    if kind == "source":
+        return round((float(seg["end"]) - float(seg["start"]))
+                     / float(seg.get("speed", 1.0)), 3)
+    if kind in ("hold", "image"):
+        return round(int(seg["ms"]) / 1000.0, 3)
+    return round(float(seg["end"]) - float(seg["start"]), 3)  # clip
+
+
+def source_segments(segments):
+    return [s for s in segments if segment_kind(s) == "source"]
+
+
+def needs_fast_path(segments):
+    """True when the recipe uses anything the source (reframe) path cannot
+    render: inserts are already 9:16 and speed changes are applied per part,
+    so both need the canonical, already-framed clip as the cutting input."""
+    return any(segment_kind(s) != "source" or float(s.get("speed", 1.0)) != 1.0
+               for s in segments)
+
+
+def asset_path(assets_dir, src):
+    """Absolute path of ``src`` inside ``assets_dir``. Bare file names only:
+    a traversal, an unknown extension or a missing file raises RecutError."""
+    if not assets_dir:
+        raise RecutError("this job has no assets folder; upload the file first")
+    name = str(src or "")
+    if not name or name != os.path.basename(name) or name.startswith("."):
+        raise RecutError(f"src must be a bare file name (got {name!r})")
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in ASSET_EXTENSIONS:
+        raise RecutError(f"src {name!r}: unsupported extension {ext or '(none)'}")
+    root = os.path.realpath(assets_dir)
+    path = os.path.realpath(os.path.join(root, name))
+    if os.path.dirname(path) != root or not os.path.isfile(path):
+        raise RecutError(f"src {name!r} is not an uploaded asset of this job")
+    return path
+
+
+def _number(seg, key, i, label):
+    try:
+        value = float(seg[key])
+    except (KeyError, TypeError, ValueError):
+        raise RecutError(f"segment {i + 1} ({label}): {key} must be a number")
+    if value != value:  # NaN guard
+        raise RecutError(f"segment {i + 1} ({label}): {key} must be a number")
+    return value
+
+
+def _ms(seg, i, label, lo, hi):
+    try:
+        ms = int(seg["ms"])
+    except (KeyError, TypeError, ValueError):
+        raise RecutError(f"segment {i + 1} ({label}): ms must be an integer")
+    if not lo <= ms <= hi:
+        raise RecutError(f"segment {i + 1} ({label}): ms must be {lo}-{hi}")
+    return ms
+
+
+def normalize_segments(segments, source_duration=None, assets_dir=None):
+    """Validate and clamp an EDL.
+
+    Returns one dict per segment. Plain source segments come back as exactly
+    {'start', 'end'} (plus 'speed' only when it is not 1.0); other kinds carry
+    'kind'. Order is preserved — the segment order IS the clip order, and
+    reusing a source range twice is legal (an echo/replay is a real editing
+    move).
     """
     if not isinstance(segments, (list, tuple)) or not segments:
         raise RecutError("segments must be a non-empty list")
@@ -55,21 +133,63 @@ def normalize_segments(segments, source_duration=None):
 
     normalized = []
     for i, seg in enumerate(segments):
-        try:
-            start = float(seg["start"])
-            end = float(seg["end"])
-        except (KeyError, TypeError, ValueError):
-            raise RecutError(f"segment {i + 1}: start/end must be numbers")
-        if start != start or end != end:  # NaN guard
-            raise RecutError(f"segment {i + 1}: start/end must be numbers")
-        start = max(0.0, start)
-        if source_duration is not None:
-            end = min(float(source_duration), end)
-            start = min(start, float(source_duration))
-        if end - start < MIN_SEGMENT_SECONDS:
-            raise RecutError(
-                f"segment {i + 1} is shorter than {MIN_SEGMENT_SECONDS}s")
-        normalized.append({"start": round(start, 3), "end": round(end, 3)})
+        if not isinstance(seg, dict):
+            raise RecutError(f"segment {i + 1} must be an object")
+        kind = segment_kind(seg)
+        if kind not in KINDS:
+            raise RecutError(f"segment {i + 1}: unknown kind {kind!r}")
+
+        if kind == "source":
+            start = _number(seg, "start", i, kind)
+            end = _number(seg, "end", i, kind)
+            start = max(0.0, start)
+            if source_duration is not None:
+                end = min(float(source_duration), end)
+                start = min(start, float(source_duration))
+            if end - start < MIN_SEGMENT_SECONDS:
+                raise RecutError(
+                    f"segment {i + 1} is shorter than {MIN_SEGMENT_SECONDS}s")
+            out = {"start": round(start, 3), "end": round(end, 3)}
+            if seg.get("speed") is not None:
+                try:
+                    speed = float(seg["speed"])
+                except (TypeError, ValueError):
+                    raise RecutError(f"segment {i + 1}: speed must be a number")
+                if not SPEED_MIN <= speed <= SPEED_MAX:
+                    raise RecutError(
+                        f"segment {i + 1}: speed must be {SPEED_MIN}-{SPEED_MAX}")
+                if speed != 1.0:
+                    out["speed"] = round(speed, 3)
+            normalized.append(out)
+
+        elif kind == "hold":
+            at = max(0.0, _number(seg, "at", i, kind))
+            if source_duration is not None and at > float(source_duration):
+                raise RecutError(f"segment {i + 1} (hold): at is beyond the source")
+            normalized.append({"kind": "hold", "at": round(at, 3),
+                               "ms": _ms(seg, i, "hold", HOLD_MS_MIN, HOLD_MS_MAX)})
+
+        elif kind == "image":
+            path = asset_path(assets_dir, seg.get("src"))
+            if os.path.splitext(path)[1].lower() not in IMAGE_EXTENSIONS:
+                raise RecutError(f"segment {i + 1} (image): src must be an image file")
+            out = {"kind": "image", "src": os.path.basename(path),
+                   "ms": _ms(seg, i, "image", IMAGE_MS_MIN, IMAGE_MS_MAX)}
+            if seg.get("zoom"):
+                out["zoom"] = True
+            normalized.append(out)
+
+        else:  # clip
+            path = asset_path(assets_dir, seg.get("src"))
+            if os.path.splitext(path)[1].lower() not in VIDEO_EXTENSIONS:
+                raise RecutError(f"segment {i + 1} (clip): src must be a video file")
+            start = max(0.0, _number(seg, "start", i, kind))
+            end = _number(seg, "end", i, kind)
+            if end - start < MIN_SEGMENT_SECONDS:
+                raise RecutError(
+                    f"segment {i + 1} is shorter than {MIN_SEGMENT_SECONDS}s")
+            normalized.append({"kind": "clip", "src": os.path.basename(path),
+                               "start": round(start, 3), "end": round(end, 3)})
 
     if total_duration(normalized) > MAX_TOTAL_SECONDS:
         raise RecutError(f"clip would exceed {MAX_TOTAL_SECONDS:.0f}s")
@@ -77,7 +197,7 @@ def normalize_segments(segments, source_duration=None):
 
 
 def total_duration(segments):
-    return round(sum(s["end"] - s["start"] for s in segments), 3)
+    return round(sum(segment_duration(s) for s in segments), 3)
 
 
 def within_range(segments, range_start, range_end, tolerance=RANGE_TOLERANCE):

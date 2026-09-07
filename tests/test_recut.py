@@ -292,3 +292,102 @@ class TestPerformRecut:
                 reframe=True, runner=self._touching_runner,
                 renderer=lambda *a: False)
         assert all(not f.startswith("temp_") for f in os.listdir(tmp_path))
+
+
+class TestKinds:
+    def test_plain_segment_is_source_and_unchanged(self):
+        assert recut.segment_kind(_seg(1, 2)) == "source"
+        assert recut.normalize_segments([_seg(1, 2)]) == [_seg(1.0, 2.0)]
+
+    def test_unknown_kind_rejected(self):
+        with pytest.raises(recut.RecutError, match="kind"):
+            recut.normalize_segments([{"kind": "wipe", "ms": 100}])
+
+    def test_speed_kept_only_when_not_one(self):
+        segs = recut.normalize_segments([
+            {"start": 0, "end": 4, "speed": 1.0},
+            {"start": 4, "end": 8, "speed": 0.5},
+        ])
+        assert segs == [_seg(0.0, 4.0), {"start": 4.0, "end": 8.0, "speed": 0.5}]
+
+    @pytest.mark.parametrize("speed", [0.1, 4.5, "fast"])
+    def test_speed_out_of_range_rejected(self, speed):
+        with pytest.raises(recut.RecutError, match="speed"):
+            recut.normalize_segments([{"start": 0, "end": 4, "speed": speed}])
+
+    def test_hold_normalizes_and_clamps_at(self):
+        segs = recut.normalize_segments(
+            [_seg(0, 5), {"kind": "hold", "at": 5.0, "ms": 100}], source_duration=30)
+        assert segs[1] == {"kind": "hold", "at": 5.0, "ms": 100}
+
+    @pytest.mark.parametrize("ms", [10, 5000])
+    def test_hold_ms_out_of_range_rejected(self, ms):
+        with pytest.raises(recut.RecutError, match="hold"):
+            recut.normalize_segments([{"kind": "hold", "at": 1, "ms": ms}])
+
+    def test_hold_at_beyond_source_rejected(self):
+        with pytest.raises(recut.RecutError, match="hold"):
+            recut.normalize_segments(
+                [{"kind": "hold", "at": 31, "ms": 100}], source_duration=30)
+
+    def test_image_requires_assets_dir_and_image_extension(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"kind": "image", "src": "logo.png", "ms": 1200, "zoom": True}],
+            assets_dir=str(tmp_path))
+        assert segs == [{"kind": "image", "src": "logo.png", "ms": 1200, "zoom": True}]
+        with pytest.raises(recut.RecutError, match="assets"):
+            recut.normalize_segments(
+                [{"kind": "image", "src": "logo.png", "ms": 1200}])
+        (tmp_path / "movie.mp4").write_bytes(b"x")
+        with pytest.raises(recut.RecutError, match="image"):
+            recut.normalize_segments(
+                [{"kind": "image", "src": "movie.mp4", "ms": 1200}],
+                assets_dir=str(tmp_path))
+
+    def test_src_traversal_and_missing_file_rejected(self, tmp_path):
+        with pytest.raises(recut.RecutError, match="src"):
+            recut.normalize_segments(
+                [{"kind": "image", "src": "../etc/passwd.png", "ms": 500}],
+                assets_dir=str(tmp_path))
+        with pytest.raises(recut.RecutError, match="src"):
+            recut.normalize_segments(
+                [{"kind": "image", "src": "nope.png", "ms": 500}],
+                assets_dir=str(tmp_path))
+
+    def test_clip_kind(self, tmp_path):
+        (tmp_path / "b.mp4").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"kind": "clip", "src": "b.mp4", "start": 3, "end": 4.5}],
+            assets_dir=str(tmp_path))
+        assert segs == [{"kind": "clip", "src": "b.mp4", "start": 3.0, "end": 4.5}]
+        with pytest.raises(recut.RecutError, match="shorter"):
+            recut.normalize_segments(
+                [{"kind": "clip", "src": "b.mp4", "start": 3, "end": 3.2}],
+                assets_dir=str(tmp_path))
+
+    def test_max_segments_is_24(self):
+        assert recut.MAX_SEGMENTS == 24
+
+
+class TestDurations:
+    def test_segment_duration_per_kind(self):
+        assert recut.segment_duration(_seg(0, 4)) == 4.0
+        assert recut.segment_duration({"start": 0, "end": 4, "speed": 0.5}) == 8.0
+        assert recut.segment_duration({"kind": "hold", "at": 1, "ms": 100}) == 0.1
+        assert recut.segment_duration({"kind": "image", "src": "a.png", "ms": 1200}) == 1.2
+        assert recut.segment_duration({"kind": "clip", "src": "b.mp4", "start": 3, "end": 4.5}) == 1.5
+
+    def test_total_duration_sums_kinds(self):
+        segs = [_seg(0, 4), {"kind": "hold", "at": 4, "ms": 100},
+                {"start": 4, "end": 6, "speed": 0.5}]
+        assert recut.total_duration(segs) == 8.1
+
+    def test_source_segments_filters(self):
+        segs = [_seg(0, 4), {"kind": "hold", "at": 4, "ms": 100}]
+        assert recut.source_segments(segs) == [_seg(0, 4)]
+
+    def test_needs_fast_path(self):
+        assert recut.needs_fast_path([_seg(0, 4)]) is False
+        assert recut.needs_fast_path([{"start": 0, "end": 4, "speed": 2.0}]) is True
+        assert recut.needs_fast_path([_seg(0, 4), {"kind": "hold", "at": 4, "ms": 100}]) is True
