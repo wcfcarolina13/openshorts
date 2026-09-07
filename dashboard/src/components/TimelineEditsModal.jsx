@@ -49,7 +49,8 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     // overlay (pause badge / image / clip placeholder) is showing.
     const [simOverlay, setSimOverlay] = useState(null);
     const videoRef = useRef(null);
-    const simRef = useRef({ lastSrc: null, fired: new Set(), timer: null, raf: null });
+    // `loop` is a setInterval handle: rAF would freeze in a background tab.
+    const simRef = useRef({ lastSrc: null, fired: new Set(), timer: null, loop: null });
     const fileRef = useRef(null);
     const barRef = useRef(null);
 
@@ -125,8 +126,9 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         if (!v) return undefined;
         const sim = simRef.current;
         const clearTimer = () => { if (sim.timer) { clearTimeout(sim.timer); sim.timer = null; } };
+        const stopLoop = () => { if (sim.loop) { clearInterval(sim.loop); sim.loop = null; } };
         const tick = () => {
-            if (v.paused || v.ended) { sim.raf = null; return; }
+            if (v.paused || v.ended) { stopLoop(); return; }
             const src = renderedToSource(v.currentTime, renderedSegments);
             // slow ranges: change the playback rate while inside one
             const slow = pendingEdits.find((e) => e.type === 'slow' && src >= e.from && src < e.to);
@@ -147,25 +149,35 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                         sim.timer = null;
                         v.play().catch(() => {});
                     }, ms);
-                    sim.raf = null;
+                    stopLoop();
                     return;
                 }
             }
             setPlayhead(src);
-            sim.raf = requestAnimationFrame(tick);
         };
-        const onPlay = () => { if (!sim.raf) { sim.lastSrc = renderedToSource(v.currentTime, renderedSegments); sim.raf = requestAnimationFrame(tick); } };
+        const onPlay = () => {
+            if (sim.loop) return;
+            sim.lastSrc = renderedToSource(v.currentTime, renderedSegments);
+            sim.loop = setInterval(tick, 40);
+        };
+        // timeupdate is the safety net: if this effect re-attached while the
+        // video was already playing (no new 'play' event), the loop restarts.
+        const onTimeUpdate = () => { if (!sim.loop && !v.paused && !v.ended) onPlay(); };
         const onSeeked = () => { sim.fired.clear(); sim.lastSrc = renderedToSource(v.currentTime, renderedSegments); };
         const onEnded = () => { sim.fired.clear(); v.playbackRate = 1; };
         v.addEventListener('play', onPlay);
+        v.addEventListener('playing', onPlay);
+        v.addEventListener('timeupdate', onTimeUpdate);
         v.addEventListener('seeked', onSeeked);
         v.addEventListener('ended', onEnded);
+        if (!v.paused && !v.ended) onPlay();
         return () => {
             v.removeEventListener('play', onPlay);
+            v.removeEventListener('playing', onPlay);
+            v.removeEventListener('timeupdate', onTimeUpdate);
             v.removeEventListener('seeked', onSeeked);
             v.removeEventListener('ended', onEnded);
-            if (sim.raf) cancelAnimationFrame(sim.raf);
-            sim.raf = null;
+            stopLoop();
             clearTimer();
             v.playbackRate = 1;
         };
