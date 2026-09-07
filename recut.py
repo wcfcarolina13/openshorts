@@ -201,12 +201,16 @@ def total_duration(segments):
 
 
 def within_range(segments, range_start, range_end, tolerance=RANGE_TOLERANCE):
-    """True when every segment fits inside [range_start, range_end]."""
-    return all(
-        s["start"] >= float(range_start) - tolerance
-        and s["end"] <= float(range_end) + tolerance
-        for s in segments
-    )
+    """True when every source segment (and every hold's frame) fits inside
+    [range_start, range_end]. Inserts have no source position."""
+    lo, hi = float(range_start) - tolerance, float(range_end) + tolerance
+    for s in segments:
+        kind = segment_kind(s)
+        if kind == "source" and not (s["start"] >= lo and s["end"] <= hi):
+            return False
+        if kind == "hold" and not (lo <= s["at"] <= hi):
+            return False
+    return True
 
 
 def rebase_segments(segments, range_start, range_end=None):
@@ -214,21 +218,35 @@ def rebase_segments(segments, range_start, range_end=None):
 
     Used by the fast path: the canonical clip's t=0 is the source's
     ``range_start``. Clamps to the file bounds so tolerance-admitted segments
-    never produce negative seek times.
+    never produce negative seek times. Inserts carry no source time and pass
+    through unchanged; a hold's ``at`` is rebased like a start.
     """
     rebased = []
     for seg in segments:
-        start = max(0.0, seg["start"] - float(range_start))
-        end = seg["end"] - float(range_start)
-        if range_end is not None:
-            end = min(end, float(range_end) - float(range_start))
-        rebased.append({"start": round(start, 3), "end": round(end, 3)})
+        kind = segment_kind(seg)
+        if kind == "source":
+            start = max(0.0, seg["start"] - float(range_start))
+            end = seg["end"] - float(range_start)
+            if range_end is not None:
+                end = min(end, float(range_end) - float(range_start))
+            out = {"start": round(start, 3), "end": round(end, 3)}
+            if seg.get("speed") not in (None, 1.0):
+                out["speed"] = seg["speed"]
+            rebased.append(out)
+        elif kind == "hold":
+            at = max(0.0, seg["at"] - float(range_start))
+            if range_end is not None:
+                at = min(at, float(range_end) - float(range_start))
+            rebased.append({"kind": "hold", "at": round(at, 3), "ms": seg["ms"]})
+        else:
+            rebased.append(dict(seg))
     return rebased
 
 
 def snap_segments(segments, transcript, source_duration):
-    """Snap each segment's bounds onto word boundaries (ground truth beats
-    millisecond arithmetic — same rationale as the pipeline's snapping)."""
+    """Snap each source segment's bounds onto word boundaries (ground truth
+    beats millisecond arithmetic — same rationale as the pipeline's snapping).
+    Non-source segments are returned as they are."""
     from clip_selection import snap_clip_to_words
 
     words = transcript_words(transcript)
@@ -236,10 +254,16 @@ def snap_segments(segments, transcript, source_duration):
         return segments
     snapped = []
     for seg in segments:
+        if segment_kind(seg) != "source":
+            snapped.append(dict(seg))
+            continue
         start, end = snap_clip_to_words(
             seg["start"], seg["end"], words, source_duration,
             min_duration=MIN_SEGMENT_SECONDS, max_duration=MAX_TOTAL_SECONDS)
-        snapped.append({"start": start, "end": end})
+        out = {"start": start, "end": end}
+        if seg.get("speed") not in (None, 1.0):
+            out["speed"] = seg["speed"]
+        snapped.append(out)
     return snapped
 
 

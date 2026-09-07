@@ -391,3 +391,26 @@ class TestDurations:
         assert recut.needs_fast_path([_seg(0, 4)]) is False
         assert recut.needs_fast_path([{"start": 0, "end": 4, "speed": 2.0}]) is True
         assert recut.needs_fast_path([_seg(0, 4), {"kind": "hold", "at": 4, "ms": 100}]) is True
+
+
+class TestKindAwareRanges:
+    def test_within_range_checks_sources_and_hold_at(self):
+        segs = [_seg(10, 20), {"kind": "hold", "at": 20, "ms": 100},
+                {"kind": "image", "src": "a.png", "ms": 500}]
+        assert recut.within_range(segs, 10, 40) is True
+        assert recut.within_range([{"kind": "hold", "at": 45, "ms": 100}], 10, 40) is False
+
+    def test_rebase_moves_sources_and_hold_only(self):
+        segs = [{"start": 15, "end": 20, "speed": 0.5},
+                {"kind": "hold", "at": 20, "ms": 100},
+                {"kind": "clip", "src": "b.mp4", "start": 1, "end": 2}]
+        out = recut.rebase_segments(segs, 10, 40)
+        assert out == [{"start": 5.0, "end": 10.0, "speed": 0.5},
+                       {"kind": "hold", "at": 10.0, "ms": 100},
+                       {"kind": "clip", "src": "b.mp4", "start": 1, "end": 2}]
+
+    def test_snap_leaves_non_source_segments_alone(self):
+        segs = [_seg(11.8, 20.2), {"kind": "hold", "at": 20.2, "ms": 100}]
+        out = recut.snap_segments(segs, TRANSCRIPT, 60)
+        assert out[1] == {"kind": "hold", "at": 20.2, "ms": 100}
+        assert out[0]["start"] <= 12.0 and out[0]["end"] >= 20.4
