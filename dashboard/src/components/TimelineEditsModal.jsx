@@ -31,6 +31,7 @@ const snapTo = (value, targets) => {
 };
 const ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.mp4,.mov';
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+const VIDEO_EXT = /\.(mp4|mov)$/i;
 
 function fmt(t) {
     if (!Number.isFinite(t)) return '–:––';
@@ -261,9 +262,10 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     };
 
     const addInsertFor = (name, mode = insertMode) => {
-        // Only a still can ride over the footage; a video overlay would mean
-        // compositing a second stream and deciding what to do with its audio.
-        if (mode === 'inline' && IMAGE_EXT.test(name)) {
+        // Anything we accept can ride over the footage: a still is held for
+        // the window, a GIF or a video loops through it. Overlay audio is
+        // dropped by the renderer so the speaker underneath stays audible.
+        if (mode === 'inline') {
             const from = playhead;
             const to = round3(Math.min(span.end, from + 2));
             if (to - from < 0.5) {
@@ -290,8 +292,9 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
             setEdits((prev) => prev.map((e) => (e.id === edit.id
                 ? { id: e.id, type: 'overlay', from, to, src: e.src, ...OVERLAY_DEFAULT } : e)));
         } else if (mode === 'fill' && edit.type === 'overlay') {
-            setEdits((prev) => prev.map((e) => (e.id === edit.id
-                ? { id: e.id, type: 'insert', at: e.from, kind: 'image', src: e.src, ms: 1200, zoom: false } : e)));
+            setEdits((prev) => prev.map((e) => (e.id === edit.id ? (VIDEO_EXT.test(e.src)
+                ? { id: e.id, type: 'insert', at: e.from, kind: 'clip', src: e.src, start: 0, end: round3(Math.max(0.5, e.to - e.from)) }
+                : { id: e.id, type: 'insert', at: e.from, kind: 'image', src: e.src, ms: 1200, zoom: false }) : e)));
         }
     };
 
@@ -444,12 +447,23 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                     }}
                                     className={`absolute touch-none cursor-move ${draggingId === o.id ? 'outline outline-1 outline-brass' : 'hover:outline hover:outline-1 hover:outline-brass/60'}`}
                                 >
-                                    <img
-                                        src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
-                                        alt=""
-                                        draggable={false}
-                                        className="w-full h-auto select-none pointer-events-none"
-                                    />
+                                    {VIDEO_EXT.test(o.src) ? (
+                                        <video
+                                            src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
+                                            autoPlay
+                                            muted
+                                            loop
+                                            playsInline
+                                            className="w-full h-auto select-none pointer-events-none"
+                                        />
+                                    ) : (
+                                        <img
+                                            src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
+                                            alt=""
+                                            draggable={false}
+                                            className="w-full h-auto select-none pointer-events-none"
+                                        />
+                                    )}
                                     <span
                                         onPointerDown={startDrag(o, 'resize')}
                                         className="absolute -right-1 -bottom-1 w-3 h-3 rounded-sm bg-brass cursor-nwse-resize touch-none"
@@ -578,7 +592,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                     <span className="block text-sm">insert media</span>
                                     <span className="block text-[11px] text-muted">
                                         {insertMode === 'inline'
-                                            ? 'an image over the footage — drag it where you want it (images only)'
+                                            ? 'an image, sticker or video over the footage — drag it where you want it'
                                             : 'an image or a piece of another video, taking the whole frame'}
                                     </span>
                                 </span>
@@ -684,6 +698,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                     onChange={(ev) => patchEdit(e.id, { end: round3(Math.max(e.start + 0.5, parseFloat(ev.target.value) || e.end)) })}
                                                     className="input-field w-16 text-[12px] py-0.5" />
                                                 <span className="text-muted">s of the file</span>
+                                                <button onClick={() => setEditMode(e, 'inline')} className={CHIP_BTN} title="show it over the footage instead">inline</button>
                                             </div>
                                         )}
                                     </div>

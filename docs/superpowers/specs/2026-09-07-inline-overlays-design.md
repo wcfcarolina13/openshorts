@@ -28,16 +28,19 @@ Only `source` segments carry `overlay`. One overlay per segment: two overlays
 across the same moment would need a compositing order the UI has no way to
 express, so the first one wins, exactly as section speeds do.
 
-Images only for now. A video overlay means a second video stream and a
-decision about its audio; `clip` inserts stay fill-only.
+Any accepted asset may ride inline — a still, an animated GIF/sticker, or a
+video. A motion overlay is silent: only the footage's own audio track is
+mapped, so nothing ever talks over the speaker underneath. `clip` inserts and
+overlays are now the same set of files in two modes, and the editor converts
+an edit between them without a re-upload.
 
 ## Limits (recut.py)
 
 - `OVERLAY_W_MIN = 0.05`, `OVERLAY_W_MAX = 1.0` of frame width.
 - `x`, `y` clamped to `0.0-1.0`; a box may run past the right or bottom edge
   and is cropped there, which is what dragging to an edge should do.
-- `src` must be an image asset, resolved through `asset_path` like every
-  other insert (bare names, no traversal).
+- `src` is any uploaded asset, resolved through `asset_path` like every other
+  insert (bare names, known extension, no traversal).
 - A source segment carrying an overlay still needs the fast path: the
   canonical clip is already framed, and the overlay's fractions are in that
   frame's terms.
@@ -49,13 +52,28 @@ re-encode. Speed composes with it:
 
 ```
 [0:v]setpts=PTS/{speed},fps={fps}[base];
-[1:v]scale={round(w*width)}:-2[ov];
+[1:v]{setpts=PTS-STARTPTS,}scale={round(w*width)}:-2[ov];
 [base][ov]overlay={round(x*width)}:{round(y*height)}[v]
 ```
 
 `overlay`'s default `eof_action=repeat` holds a single still for the whole
-part, so the image input needs no `-loop`. `-2` keeps the scaled height even,
-which `yuv420p` requires.
+part, so a still image input needs no `-loop`. `-2` keeps the scaled height
+even, which `yuv420p` requires.
+
+Motion overlays repeat instead of freezing, so a two-second sticker fills a
+six-second window rather than holding its last frame:
+
+| asset | input flags |
+|---|---|
+| still (`.png/.jpg/.jpeg/.webp`) | none — held by `eof_action=repeat` |
+| `.gif` | `-ignore_loop 0` (otherwise the GIF's own loop count wins) |
+| `.mp4`, `.mov` | `-stream_loop -1` |
+
+Looping forever is bounded: the `overlay` filter emits EOF when its **main**
+input ends, so the part is still the length of the footage under it.
+`setpts=PTS-STARTPTS` on a looped input keeps its timestamps aligned with the
+footage's. Only `0:a` is ever mapped, which is what drops a video overlay's
+own soundtrack.
 
 Durations do not change, so `virtual_transcript` and the caption re-timing
 need no changes at all.

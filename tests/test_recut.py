@@ -602,11 +602,18 @@ class TestInlineOverlays:
         assert segs[0]["overlay"]["y"] == 1.0
         assert segs[0]["overlay"]["w"] == recut.OVERLAY_W_MAX
 
-    def test_overlay_rejects_a_video_asset(self, tmp_path):
+    def test_overlay_accepts_a_video_asset(self, tmp_path):
         (tmp_path / "b.mp4").write_bytes(b"x")
-        with pytest.raises(recut.RecutError, match="image"):
+        segs = recut.normalize_segments(
+            [{"start": 1, "end": 3, "overlay": {"src": "b.mp4", "w": 0.3}}],
+            assets_dir=str(tmp_path))
+        assert segs[0]["overlay"]["src"] == "b.mp4"
+
+    def test_overlay_rejects_an_unknown_extension(self, tmp_path):
+        (tmp_path / "notes.txt").write_bytes(b"x")
+        with pytest.raises(recut.RecutError, match="unsupported extension"):
             recut.normalize_segments(
-                [{"start": 1, "end": 3, "overlay": {"src": "b.mp4", "w": 0.3}}],
+                [{"start": 1, "end": 3, "overlay": {"src": "notes.txt", "w": 0.3}}],
                 assets_dir=str(tmp_path))
 
     def test_overlay_rejects_a_traversal(self, tmp_path):
@@ -663,6 +670,59 @@ class TestInlineOverlays:
         (tmp_path / "logo.png").write_bytes(b"x")
         segs = [{"start": 1, "end": 3, "overlay": {"src": "logo.png", "x": 0, "y": 0, "w": 0.3}}]
         assert recut.total_duration(segs) == 2.0
+
+    def _overlay_cmd(self, tmp_path, name, **seg):
+        (tmp_path / name).write_bytes(b"x")
+        return recut.cut_commands(
+            "in.mp4",
+            [{"start": 1, "end": 3,
+              "overlay": {"src": name, "x": 0, "y": 0, "w": 0.25}, **seg}],
+            ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
+
+    def test_every_overlay_part_is_bounded_by_the_footage_under_it(self, tmp_path):
+        """A looped overlay input never ends on its own; without -t ffmpeg
+        encodes until the disk fills."""
+        for name in ("logo.png", "sticker.mp4", "wave.gif"):
+            cmd = self._overlay_cmd(tmp_path, name)
+            assert cmd[cmd.index("-t") + 1] == "2"
+        slowed = self._overlay_cmd(tmp_path, "sticker.mp4", speed=0.5)
+        assert slowed[slowed.index("-t") + 1] == "4"
+
+    def test_a_still_overlay_is_held_rather_than_looped(self, tmp_path):
+        cmd = self._overlay_cmd(tmp_path, "logo.png")
+        assert "-stream_loop" not in cmd and "-ignore_loop" not in cmd
+        assert "setpts=PTS-STARTPTS" not in cmd[cmd.index("-filter_complex") + 1]
+
+    def test_a_video_overlay_loops_for_the_whole_window(self, tmp_path):
+        cmd = self._overlay_cmd(tmp_path, "sticker.mp4")
+        # The loop flags belong to the SECOND input, after the footage's -i.
+        assert cmd[8:12] == ["-stream_loop", "-1", "-i", str(tmp_path / "sticker.mp4")]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "[1:v]setpts=PTS-STARTPTS,scale=270:-2[ov]" in fc
+
+    def test_an_animated_gif_overlay_loops(self, tmp_path):
+        cmd = self._overlay_cmd(tmp_path, "wave.gif")
+        assert cmd[8:12] == ["-ignore_loop", "0", "-i", str(tmp_path / "wave.gif")]
+        assert "setpts=PTS-STARTPTS" in cmd[cmd.index("-filter_complex") + 1]
+
+    def test_a_video_overlay_keeps_the_speaker_audible(self, tmp_path):
+        """The overlay's own soundtrack is never mapped, so nothing talks over
+        the footage under it."""
+        cmd = self._overlay_cmd(tmp_path, "sticker.mp4")
+        assert "1:a" not in cmd
+        assert "0:a" in cmd
+
+    def test_a_video_overlay_does_not_change_the_running_time(self, tmp_path):
+        (tmp_path / "sticker.mp4").write_bytes(b"x")
+        segs = [{"start": 1, "end": 3, "overlay": {"src": "sticker.mp4", "x": 0, "y": 0, "w": 0.3}}]
+        assert recut.total_duration(segs) == 2.0
+        assert recut.needs_fast_path(segs) is True
+
+    def test_a_video_overlay_composes_with_a_speed_change(self, tmp_path):
+        cmd = self._overlay_cmd(tmp_path, "sticker.mp4", speed=0.5)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "[0:v]setpts=PTS/0.5,fps=30[base]" in fc
+        assert "[1:v]setpts=PTS-STARTPTS,scale=270:-2[ov]" in fc
 
     def test_rebase_carries_the_overlay_onto_the_canonical_file(self):
         overlay = {"src": "logo.png", "x": 0.8, "y": 0.0, "w": 0.2}

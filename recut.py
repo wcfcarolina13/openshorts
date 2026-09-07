@@ -127,6 +127,10 @@ def _overlay(seg, i, assets_dir):
     The box is stored as fractions of the frame so a recipe survives being
     re-rendered at another aspect ratio; x/y are the box's top-left corner and
     may sit at the very edge, where the frame crops it.
+
+    Any uploaded asset may ride inline: a still, an animated GIF/sticker or a
+    video. Motion overlays loop for as long as the window lasts and their own
+    audio is dropped, so the speaker under them is never talked over.
     """
     raw = seg.get("overlay")
     if raw is None:
@@ -136,10 +140,9 @@ def _overlay(seg, i, assets_dir):
     src = raw.get("src")
     if not isinstance(src, str) or not src:
         raise RecutError(f"segment {i + 1}: overlay needs a src")
-    # asset_path enforces "bare name, known extension, file exists".
+    # asset_path enforces "bare name, known extension, file exists", which is
+    # the whole restriction: stills, GIFs and videos may all sit inline.
     path = asset_path(assets_dir, src)
-    if os.path.splitext(path)[1].lower() not in IMAGE_EXTENSIONS:
-        raise RecutError(f"segment {i + 1}: an overlay must be an image file")
 
     def frac(key, low, high, default):
         if raw.get(key) is None:
@@ -154,6 +157,22 @@ def _overlay(seg, i, assets_dir):
             "x": frac("x", 0.0, 1.0, 0.0),
             "y": frac("y", 0.0, 1.0, 0.0),
             "w": frac("w", OVERLAY_W_MIN, OVERLAY_W_MAX, 0.25)}
+
+
+def _overlay_input_args(path):
+    """Input flags that make an inline overlay repeat for the whole window.
+
+    Empty for a still — overlay's own eof_action=repeat already holds a
+    one-frame input. An endless input does NOT end when the footage does (a
+    real render ran to 85 MB before it was killed), so every overlay part
+    carries an explicit ``-t`` of the footage's own length.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".gif":
+        return ["-ignore_loop", "0"]      # a GIF otherwise obeys its own loop count
+    if ext in VIDEO_EXTENSIONS:
+        return ["-stream_loop", "-1"]
+    return []
 
 
 def normalize_segments(segments, source_duration=None, assets_dir=None):
@@ -468,17 +487,26 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
             cmd = ["ffmpeg", "-y", "-ss", str(seg["start"]), "-to", str(seg["end"]),
                    "-i", input_path]
             if overlay:
-                # Composite the still over the footage. overlay's default
-                # eof_action=repeat holds a one-frame input for the whole part,
-                # and -2 keeps the scaled height even for yuv420p.
-                cmd += ["-i", asset_path(assets_dir, overlay["src"])]
+                # Composite the asset over the footage: a still is held for the
+                # whole part, a GIF or a video loops until the footage under it
+                # runs out. Only [0:a] is mapped, so a motion overlay never
+                # talks over the speaker. -2 keeps the scaled height even for
+                # yuv420p, and PTS-STARTPTS keeps a looped input's timestamps
+                # aligned with the footage's.
+                ov_path = asset_path(assets_dir, overlay["src"])
+                loop_args = _overlay_input_args(ov_path)
+                cmd += [*loop_args, "-i", ov_path]
                 base = (f"setpts=PTS/{speed:g},fps={fps:g}" if speed != 1.0
                         else f"fps={fps:g}")
+                reset = "setpts=PTS-STARTPTS," if loop_args else ""
                 fc = (f"[0:v]{base}[base];"
-                      f"[1:v]scale={max(2, round(overlay['w'] * width))}:-2[ov];"
+                      f"[1:v]{reset}scale={max(2, round(overlay['w'] * width))}:-2[ov];"
                       f"[base][ov]overlay={round(overlay['x'] * width)}:"
                       f"{round(overlay['y'] * height)}[v]")
+                # -t is what bounds the part: a looped overlay input never
+                # ends on its own, so without it ffmpeg encodes forever.
                 cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a",
+                        "-t", f"{segment_duration(seg):g}",
                         *video_encode_args(QUALITY_FAST)]
                 if speed != 1.0:
                     af = ",".join(f for f in (_atempo_chain(speed), _loudnorm()) if f)
