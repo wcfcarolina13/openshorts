@@ -58,6 +58,13 @@ anonymous: there is no minute quota to enforce.
    `POST /api/subtitle` with `{"job_id", "clip_index", "style"}` (`classic`
    or `karaoke` word highlighting).
 
+**Timeline edits (self-host).** `recut_clip` / `POST /api/clip/rerender` take
+the clip's recipe segments; besides `{start, end[, speed]}` source ranges they
+accept `{"kind": "hold", "at", "ms"}` (freeze frame), `{"kind": "image", "src",
+"ms", "zoom"}` and `{"kind": "clip", "src", "start", "end"}` (inserts from files
+uploaded with `PUT /api/jobs/{job_id}/assets/{name}`). Captions are re-timed
+automatically.
+
 ## The choices the API cannot make for you
 
 **How many clips.** Leave `target_clips` unset by default: the AI decides, and

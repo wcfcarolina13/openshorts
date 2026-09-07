@@ -52,9 +52,12 @@ the existing stream-copy concat keeps working:
 - `clip`: `-ss start -to end` on the asset, `scale` + `pad` to 1080×1920, its
   audio resampled to the common rate.
 
-Fast vs source path: `hold`, `image`, `clip` never need the original source
-video. A `source` segment follows the existing rule (fast when inside the
-canonical range, otherwise cut from the source and re-reframed).
+Fast vs source path: **phase 1 renders holds, inserts and speed changes only on
+the fast path** (canonical clip on disk, every source segment inside the
+canonical range); otherwise `/api/clip/rerender` returns 400. Reason: source-path
+parts are cut at source resolution and reframed afterwards, while inserts are
+already 9:16, so they cannot join that concat. Plain source recipes keep the
+existing fast/source rule.
 
 ## Timing
 
