@@ -46,7 +46,13 @@ const POSITION_OPTIONS = [
 
 // Ready-made caption looks burned server-side as karaoke ASS (word highlight):
 // dimmed base text + strong active word, optional glow/pop/box effect.
+// Mirrors AUTO_CAPTION_STYLE in subtitles.py — the look the pipeline burns
+// automatically. Opening the editor starts from this so an untouched save
+// leaves the clip unchanged. (Impact resolves to Anton via fonts/openshorts-fontmap.conf.)
+const AUTO_CAPTION_PRESET = { id: 'auto', label: 'Auto (pipeline)', style: 'karaoke', effect: 'pop', highlightColor: '#FFE500', baseOpacity: 1.0, uppercase: true, fontName: 'Impact', borderWidth: 4, fontSize: 44 };
+
 const CAPTION_PRESETS = [
+    AUTO_CAPTION_PRESET,
     { id: 'tiktok',  label: 'TikTok',     style: 'karaoke', effect: 'none', highlightColor: '#FE2C55', baseOpacity: 0.75, uppercase: false, fontName: 'Verdana', borderWidth: 2 },
     { id: 'reels',   label: 'Reels',      style: 'karaoke', effect: 'none', highlightColor: '#E1306C', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
     { id: 'shorts',  label: 'Shorts Pop', style: 'karaoke', effect: 'pop',  highlightColor: '#FF0000', baseOpacity: 0.7,  uppercase: false, fontName: 'Verdana', borderWidth: 2 },
@@ -67,23 +73,23 @@ const swatchClass = (selected) =>
 
 export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
-    const [fontSize] = useState(24);
-    const [fontName, setFontName] = useState('Verdana');
+    const [fontSize, setFontSize] = useState(AUTO_CAPTION_PRESET.fontSize);
+    const [fontName, setFontName] = useState(AUTO_CAPTION_PRESET.fontName);
     const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#FFDD00');
+    const [highlightColor, setHighlightColor] = useState(AUTO_CAPTION_PRESET.highlightColor);
     const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(2);
+    const [borderWidth, setBorderWidth] = useState(AUTO_CAPTION_PRESET.borderWidth);
     const [bgColor, setBgColor] = useState('#000000');
     const [bgOpacity, setBgOpacity] = useState(0.0);
     const [animation, setAnimation] = useState('pop');
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Karaoke (server-side ASS burn) state
-    const [style, setStyle] = useState('classic'); // classic | karaoke
-    const [effect, setEffect] = useState('none'); // none | glow | pop | box
-    const [baseOpacity, setBaseOpacity] = useState(1.0);
-    const [uppercase, setUppercase] = useState(false);
-    const [activePreset, setActivePreset] = useState(null);
+    const [style, setStyle] = useState(AUTO_CAPTION_PRESET.style); // classic | karaoke
+    const [effect, setEffect] = useState(AUTO_CAPTION_PRESET.effect); // none | glow | pop | box
+    const [baseOpacity, setBaseOpacity] = useState(AUTO_CAPTION_PRESET.baseOpacity);
+    const [uppercase, setUppercase] = useState(AUTO_CAPTION_PRESET.uppercase);
+    const [activePreset, setActivePreset] = useState(AUTO_CAPTION_PRESET.id);
 
     const applyPreset = (p) => {
         setActivePreset(p.id);
@@ -94,6 +100,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         setUppercase(p.uppercase);
         setFontName(p.fontName);
         setBorderWidth(p.borderWidth);
+        if (p.fontSize) setFontSize(p.fontSize);
         setFontColor('#FFFFFF');
         setBgOpacity(0);
         // Keep the Remotion preview roughly in sync with the burned look
@@ -343,6 +350,23 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                     <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>
                                 ))}
                             </select>
+                        </div>
+
+                        {/* Text Size (sent as font_size; the pipeline's auto captions use 44) */}
+                        <div>
+                            <p className="eyebrow mb-2">Size · {fontSize}</p>
+                            <input
+                                type="range"
+                                min="16"
+                                max="72"
+                                value={fontSize}
+                                onChange={(e) => setFontSize(parseInt(e.target.value))}
+                                className="w-full accent-[var(--color-accent)]"
+                            />
+                            <div className="flex justify-between">
+                                <span className="readout">Small</span>
+                                <span className="readout">Large</span>
+                            </div>
                         </div>
 
                         {/* Text Color */}
