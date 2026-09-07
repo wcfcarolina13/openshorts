@@ -37,6 +37,9 @@ MAX_TOTAL_SECONDS = 180.0
 # the others are timeline edits (see docs/superpowers/specs/2026-09-06-timeline-edits-design.md).
 KINDS = ("source", "hold", "image", "clip")
 SPEED_MIN, SPEED_MAX = 0.25, 4.0
+# Inline overlays: box width as a fraction of the frame's width. Anything
+# under 5 % is a speck; 100 % is the whole frame, which is what "fill" is for.
+OVERLAY_W_MIN, OVERLAY_W_MAX = 0.05, 1.0
 HOLD_MS_MIN, HOLD_MS_MAX = 40, 3000
 IMAGE_MS_MIN, IMAGE_MS_MAX = 200, 10000
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -73,10 +76,11 @@ def source_segments(segments):
 
 def needs_fast_path(segments):
     """True when the recipe uses anything the source (reframe) path cannot
-    render: inserts are already 9:16 and speed changes are applied per part,
-    so both need the canonical, already-framed clip as the cutting input."""
+    render: inserts are already 9:16, speed changes are applied per part, and
+    an overlay's box is a fraction of the delivered frame, so all three need
+    the canonical, already-framed clip as the cutting input."""
     return any(segment_kind(s) != "source" or float(s.get("speed", 1.0)) != 1.0
-               for s in segments)
+               or s.get("overlay") for s in segments)
 
 
 def asset_path(assets_dir, src):
@@ -115,6 +119,41 @@ def _ms(seg, i, label, lo, hi):
     if not lo <= ms <= hi:
         raise RecutError(f"segment {i + 1} ({label}): ms must be {lo}-{hi}")
     return ms
+
+
+def _overlay(seg, i, assets_dir):
+    """Validate a source segment's inline overlay, or None if it has none.
+
+    The box is stored as fractions of the frame so a recipe survives being
+    re-rendered at another aspect ratio; x/y are the box's top-left corner and
+    may sit at the very edge, where the frame crops it.
+    """
+    raw = seg.get("overlay")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise RecutError(f"segment {i + 1}: overlay must be an object")
+    src = raw.get("src")
+    if not isinstance(src, str) or not src:
+        raise RecutError(f"segment {i + 1}: overlay needs a src")
+    # asset_path enforces "bare name, known extension, file exists".
+    path = asset_path(assets_dir, src)
+    if os.path.splitext(path)[1].lower() not in IMAGE_EXTENSIONS:
+        raise RecutError(f"segment {i + 1}: an overlay must be an image file")
+
+    def frac(key, low, high, default):
+        if raw.get(key) is None:
+            return default
+        try:
+            value = float(raw[key])
+        except (TypeError, ValueError):
+            raise RecutError(f"segment {i + 1}: overlay {key} must be a number")
+        return round(min(high, max(low, value)), 4)
+
+    return {"src": os.path.basename(path),
+            "x": frac("x", 0.0, 1.0, 0.0),
+            "y": frac("y", 0.0, 1.0, 0.0),
+            "w": frac("w", OVERLAY_W_MIN, OVERLAY_W_MAX, 0.25)}
 
 
 def normalize_segments(segments, source_duration=None, assets_dir=None):
@@ -160,6 +199,9 @@ def normalize_segments(segments, source_duration=None, assets_dir=None):
                         f"segment {i + 1}: speed must be {SPEED_MIN}-{SPEED_MAX}")
                 if speed != 1.0:
                     out["speed"] = round(speed, 3)
+            overlay = _overlay(seg, i, assets_dir)
+            if overlay:
+                out["overlay"] = overlay
             normalized.append(out)
 
         elif kind == "hold":
@@ -232,6 +274,8 @@ def rebase_segments(segments, range_start, range_end=None):
             out = {"start": round(start, 3), "end": round(end, 3)}
             if seg.get("speed") not in (None, 1.0):
                 out["speed"] = seg["speed"]
+            if seg.get("overlay"):
+                out["overlay"] = dict(seg["overlay"])
             rebased.append(out)
         elif kind == "hold":
             at = max(0.0, seg["at"] - float(range_start))
@@ -263,6 +307,8 @@ def snap_segments(segments, transcript, source_duration):
         out = {"start": start, "end": end}
         if seg.get("speed") not in (None, 1.0):
             out["speed"] = seg["speed"]
+        if seg.get("overlay"):
+            out["overlay"] = dict(seg["overlay"])
         snapped.append(out)
     return snapped
 
@@ -418,9 +464,28 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
         kind = segment_kind(seg)
         if kind == "source":
             speed = float(seg.get("speed", 1.0))
+            overlay = seg.get("overlay")
             cmd = ["ffmpeg", "-y", "-ss", str(seg["start"]), "-to", str(seg["end"]),
                    "-i", input_path]
-            if speed == 1.0:
+            if overlay:
+                # Composite the still over the footage. overlay's default
+                # eof_action=repeat holds a one-frame input for the whole part,
+                # and -2 keeps the scaled height even for yuv420p.
+                cmd += ["-i", asset_path(assets_dir, overlay["src"])]
+                base = (f"setpts=PTS/{speed:g},fps={fps:g}" if speed != 1.0
+                        else f"fps={fps:g}")
+                fc = (f"[0:v]{base}[base];"
+                      f"[1:v]scale={max(2, round(overlay['w'] * width))}:-2[ov];"
+                      f"[base][ov]overlay={round(overlay['x'] * width)}:"
+                      f"{round(overlay['y'] * height)}[v]")
+                cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a",
+                        *video_encode_args(QUALITY_FAST)]
+                if speed != 1.0:
+                    af = ",".join(f for f in (_atempo_chain(speed), _loudnorm()) if f)
+                    cmd += ["-af", af, "-ar", str(rate), *_audio_codec_args()]
+                else:
+                    cmd += audio_encode_args()
+            elif speed == 1.0:
                 # Unchanged from the pre-kinds builder: a plain recut is the
                 # delivered file, and this is the command every test pins.
                 cmd += [*video_encode_args(QUALITY_FAST), *audio_encode_args()]

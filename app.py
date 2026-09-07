@@ -3690,6 +3690,8 @@ class RerenderSegment(BaseModel):
     ms: Optional[int] = None
     src: Optional[str] = None
     zoom: Optional[bool] = None
+    # Inline overlay on a source range: {src, x, y, w} as frame fractions.
+    overlay: Optional[Dict[str, Any]] = None
 
     def as_dict(self):
         return {k: v for k, v in self.model_dump().items() if v is not None}

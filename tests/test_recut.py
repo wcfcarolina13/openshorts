@@ -578,3 +578,100 @@ class TestSampleRateAlignment:
         assert speed[speed.index("-vf") + 1] == "setpts=PTS/0.5,fps=25"
         hold = recut.cut_commands("in.mp4", [{"kind": "hold", "at": 1, "ms": 100}], ["p0"], media=media)[0]
         assert hold[hold.index("-filter_complex") + 1].endswith(",fps=25[v]")
+
+
+class TestInlineOverlays:
+    """An inline overlay rides on the source segment under it: it changes how
+    that part is rendered, never how long the clip runs."""
+
+    def test_overlay_is_normalized_to_fractions_of_the_frame(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"start": 1, "end": 3,
+              "overlay": {"src": "logo.png", "x": 0.06, "y": 0.72, "w": 0.28}}],
+            assets_dir=str(tmp_path))
+        assert segs[0]["overlay"] == {"src": "logo.png", "x": 0.06, "y": 0.72, "w": 0.28}
+
+    def test_overlay_clamps_position_and_size(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"start": 1, "end": 3,
+              "overlay": {"src": "logo.png", "x": -2, "y": 9, "w": 40}}],
+            assets_dir=str(tmp_path))
+        assert segs[0]["overlay"]["x"] == 0.0
+        assert segs[0]["overlay"]["y"] == 1.0
+        assert segs[0]["overlay"]["w"] == recut.OVERLAY_W_MAX
+
+    def test_overlay_rejects_a_video_asset(self, tmp_path):
+        (tmp_path / "b.mp4").write_bytes(b"x")
+        with pytest.raises(recut.RecutError, match="image"):
+            recut.normalize_segments(
+                [{"start": 1, "end": 3, "overlay": {"src": "b.mp4", "w": 0.3}}],
+                assets_dir=str(tmp_path))
+
+    def test_overlay_rejects_a_traversal(self, tmp_path):
+        with pytest.raises(recut.RecutError):
+            recut.normalize_segments(
+                [{"start": 1, "end": 3, "overlay": {"src": "../app.py", "w": 0.3}}],
+                assets_dir=str(tmp_path))
+
+    def test_overlay_only_belongs_on_source_segments(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"kind": "hold", "at": 2, "ms": 100, "overlay": {"src": "logo.png", "w": 0.3}}],
+            assets_dir=str(tmp_path))
+        assert "overlay" not in segs[0]
+
+    def test_overlay_part_composites_the_image_over_the_footage(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        cmd = recut.cut_commands(
+            "in.mp4",
+            [{"start": 1, "end": 3,
+              "overlay": {"src": "logo.png", "x": 0.5, "y": 0.25, "w": 0.25}}],
+            ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
+        assert cmd[2:6] == ["-ss", "1", "-to", "3"]
+        assert str(tmp_path / "logo.png") in cmd
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        # 0.25 * 1080 = 270 wide; placed at 540, 480 of a 1080x1920 frame
+        assert "scale=270:-2" in fc
+        assert "overlay=540:480" in fc
+        assert cmd[cmd.index("-map") + 1] == "[v]"
+        assert "0:a" in cmd
+
+    def test_overlay_composes_with_a_speed_change(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        cmd = recut.cut_commands(
+            "in.mp4",
+            [{"start": 1, "end": 3, "speed": 0.5,
+              "overlay": {"src": "logo.png", "x": 0, "y": 0, "w": 0.5}}],
+            ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "setpts=PTS/0.5" in fc and "fps=30" in fc
+        assert "overlay=0:0" in fc
+        assert cmd[cmd.index("-af") + 1].startswith("atempo=")
+
+    def test_a_plain_source_part_is_still_the_command_every_test_pins(self):
+        cmd = recut.cut_commands("in.mp4", [_seg(1, 3)], ["p0.mp4"], media=MEDIA)[0]
+        assert "-filter_complex" not in cmd
+
+    def test_overlay_needs_the_fast_path(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = [{"start": 1, "end": 3, "overlay": {"src": "logo.png", "x": 0, "y": 0, "w": 0.3}}]
+        assert recut.needs_fast_path(segs) is True
+
+    def test_overlay_does_not_change_the_running_time(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = [{"start": 1, "end": 3, "overlay": {"src": "logo.png", "x": 0, "y": 0, "w": 0.3}}]
+        assert recut.total_duration(segs) == 2.0
+
+    def test_rebase_carries_the_overlay_onto_the_canonical_file(self):
+        overlay = {"src": "logo.png", "x": 0.8, "y": 0.0, "w": 0.2}
+        out = recut.rebase_segments(
+            [{"start": 12.0, "end": 14.0, "speed": 0.9, "overlay": overlay}], 10.0)
+        assert out == [{"start": 2.0, "end": 4.0, "speed": 0.9, "overlay": overlay}]
+
+    def test_snap_carries_the_overlay(self, monkeypatch):
+        overlay = {"src": "logo.png", "x": 0.8, "y": 0.0, "w": 0.2}
+        segs = recut.snap_segments(
+            [{"start": 12.0, "end": 14.0, "overlay": overlay}], TRANSCRIPT, 60.0)
+        assert segs[0]["overlay"] == overlay

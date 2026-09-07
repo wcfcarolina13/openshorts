@@ -173,3 +173,65 @@ test('mixed speeds stay section slows at global 1, so the render is unchanged', 
   assert.equal(parsed.globalSpeed, 1);
   assert.deepEqual(compileSegments(parsed.base, parsed.edits, parsed.globalSpeed), segs);
 });
+
+const LOGO = { src: 'logo.png', x: 0.06, y: 0.72, w: 0.28 };
+
+test('an inline overlay rides on the source pieces it covers', () => {
+  const segs = compileSegments(base, [{ id: 'o', type: 'overlay', from: 5, to: 9, ...LOGO }]);
+  assert.deepEqual(segs, [
+    { start: 0, end: 5 },
+    { start: 5, end: 9, overlay: LOGO },
+    { start: 9, end: 20.957 },
+  ]);
+});
+
+test('an inline overlay adds no running time', () => {
+  const segs = compileSegments(base, [{ id: 'o', type: 'overlay', from: 5, to: 9, ...LOGO }]);
+  assert.equal(totalDuration(segs), totalDuration(base));
+});
+
+test('an overlay and a slow over the same range ride on one piece', () => {
+  const segs = compileSegments(base, [
+    { id: 's', type: 'slow', from: 5, to: 9, factor: 0.5 },
+    { id: 'o', type: 'overlay', from: 5, to: 9, ...LOGO },
+  ]);
+  assert.deepEqual(segs[1], { start: 5, end: 9, speed: 0.5, overlay: LOGO });
+});
+
+test('overlapping overlays: the first one wins, as speeds do', () => {
+  const other = { src: 'b.png', x: 0, y: 0, w: 0.5 };
+  const segs = compileSegments(base, [
+    { id: 'o1', type: 'overlay', from: 5, to: 9, ...LOGO },
+    { id: 'o2', type: 'overlay', from: 6, to: 8, ...other },
+  ]);
+  assert.deepEqual(segs.filter((x) => x.overlay).map((x) => x.overlay.src),
+    ['logo.png', 'logo.png', 'logo.png']);
+});
+
+test('parseRecipe reads overlays back and merges the pieces they span', () => {
+  const segs = compileSegments(base, [
+    { id: 'p', type: 'pause', at: 7, ms: 100 },
+    { id: 'o', type: 'overlay', from: 5, to: 9, ...LOGO },
+  ]);
+  const parsed = parseRecipe(segs);
+  const overlays = parsed.edits.filter((e) => e.type === 'overlay');
+  assert.equal(overlays.length, 1);
+  assert.equal(overlays[0].from, 5);
+  assert.equal(overlays[0].to, 9);
+  assert.equal(overlays[0].src, 'logo.png');
+  assert.equal(overlays[0].w, 0.28);
+});
+
+test('parseRecipe round-trips a clip with an overlay', () => {
+  const segs = compileSegments(base, [{ id: 'o', type: 'overlay', from: 5, to: 9, ...LOGO }]);
+  const parsed = parseRecipe(segs);
+  assert.deepEqual(compileSegments(parsed.base, parsed.edits, parsed.globalSpeed), segs);
+});
+
+test('two different overlays stay two edits', () => {
+  const segs = compileSegments(base, [
+    { id: 'o1', type: 'overlay', from: 3, to: 5, ...LOGO },
+    { id: 'o2', type: 'overlay', from: 9, to: 12, src: 'b.png', x: 0.5, y: 0.1, w: 0.2 },
+  ]);
+  assert.equal(parseRecipe(segs).edits.filter((e) => e.type === 'overlay').length, 2);
+});

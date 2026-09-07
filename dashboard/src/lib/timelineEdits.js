@@ -84,7 +84,7 @@ export function compileSegments(baseSegments, edits, globalSpeed = 1) {
     const cuts = new Set([a, b]);
     const events = [];
     for (const e of edits) {
-      if (e.type === 'slow') {
+      if (e.type === 'slow' || e.type === 'overlay') {
         const from = Math.max(a, e.from);
         const to = Math.min(b, e.to);
         if (to > from) { cuts.add(from); cuts.add(to); }
@@ -98,6 +98,12 @@ export function compileSegments(baseSegments, edits, globalSpeed = 1) {
       const slow = edits.find((e) => e.type === 'slow' && mid > e.from && mid < e.to);
       return slow ? slow.factor : 1;
     };
+    // One overlay per piece: two stacked over the same moment would need a
+    // compositing order the editor has no way to express, so the first wins.
+    const overlayAt = (mid) => {
+      const o = edits.find((e) => e.type === 'overlay' && mid > e.from && mid < e.to);
+      return o ? { src: o.src, x: o.x, y: o.y, w: o.w } : null;
+    };
     // items: source pieces interleaved with the events anchored at each point.
     const items = [];
     points.forEach((p, i) => {
@@ -107,6 +113,8 @@ export function compileSegments(baseSegments, edits, globalSpeed = 1) {
         const piece = { start: p, end: q };
         const speed = clampSpeed(speedAt((p + q) / 2) * globalSpeed);
         if (speed !== 1) piece.speed = speed;
+        const overlay = overlayAt((p + q) / 2);
+        if (overlay) piece.overlay = overlay;
         items.push({ piece });
       }
     });
@@ -115,8 +123,10 @@ export function compileSegments(baseSegments, edits, globalSpeed = 1) {
     for (let i = 0; i < items.length; i += 1) {
       const it = items[i];
       if (!it.piece || it.piece.end - it.piece.start >= MIN_SEGMENT_SECONDS) continue;
-      const next = items.slice(i + 1).find((x) => x.piece);
-      const prev = items.slice(0, i).reverse().find((x) => x.piece);
+      const sameLook = (x) => JSON.stringify(x.piece.overlay || null)
+        === JSON.stringify(it.piece.overlay || null) && (x.piece.speed || 1) === (it.piece.speed || 1);
+      const next = items.slice(i + 1).find((x) => x.piece && sameLook(x));
+      const prev = items.slice(0, i).reverse().find((x) => x.piece && sameLook(x));
       if (next) next.piece.start = it.piece.start;
       else if (prev) prev.piece.end = it.piece.end;
       else continue; // lone tiny range: keep it, the server will reject it
@@ -158,6 +168,13 @@ export function parseRecipe(segments) {
       const last = base[base.length - 1];
       if (last && last.end === seg.start) last.end = seg.end;
       else base.push({ start: seg.start, end: seg.end });
+      if (seg.overlay) {
+        const prev = edits.filter((e) => e.type === 'overlay').pop();
+        if (prev && prev.to === seg.start && prev.src === seg.overlay.src
+            && prev.x === seg.overlay.x && prev.y === seg.overlay.y
+            && prev.w === seg.overlay.w) prev.to = seg.end;
+        else edits.push({ id: newId(), type: 'overlay', from: seg.start, to: seg.end, ...seg.overlay });
+      }
       if (seg.speed && seg.speed !== 1 && globalSpeed === 1) {
         const prevSlow = edits[edits.length - 1];
         if (prevSlow && prevSlow.type === 'slow' && prevSlow.to === seg.start

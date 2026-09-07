@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Pause, Gauge, ImagePlus, Trash2, Loader2, AlertCircle } from 'lucide-react';
+import { Pause, Gauge, ImagePlus, Trash2, Loader2, AlertCircle, Layers, Maximize2 } from 'lucide-react';
 import Modal from './ui/Modal';
 import { getApiUrl } from '../config';
 import { apiFetch, apiJson } from '../lib/api';
@@ -19,6 +19,16 @@ const SPEED_CHOICES = [0.5, 0.75, 1.5, 2];
 // are just the rates people ask for by name.
 const CLIP_SPEED_CHOICES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const SPEED_STEP = 0.05;
+// Inline overlays: box as fractions of the frame. Snap to the edges, the
+// centre lines and the rule-of-thirds so a logo lands somewhere deliberate.
+const OVERLAY_W_MIN = 0.05;
+const OVERLAY_W_MAX = 1;
+const OVERLAY_DEFAULT = { x: 0.06, y: 0.72, w: 0.28 };
+const SNAP = 0.02;
+const snapTo = (value, targets) => {
+    const hit = targets.find((t) => Math.abs(value - t) < SNAP);
+    return hit === undefined ? value : hit;
+};
 const ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.mp4,.mov';
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
 
@@ -49,6 +59,10 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     const [assets, setAssets] = useState([]);
     const [playhead, setPlayhead] = useState(0);
     const [uploading, setUploading] = useState(false);
+    // Which uploaded file the next insert uses, and whether it fills the
+    // frame (its own stretch of timeline) or sits inline over the footage.
+    const [insertMode, setInsertMode] = useState('fill');
+    const [draggingId, setDraggingId] = useState(null);
     const [rendering, setRendering] = useState(false);
     const [renderSeconds, setRenderSeconds] = useState(0);
     const [error, setError] = useState(null);
@@ -246,11 +260,39 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         setEdits((prev) => [...prev, { id: newId(), type: 'slow', from, to, factor: 0.5 }]);
     };
 
-    const addInsertFor = (name) => {
+    const addInsertFor = (name, mode = insertMode) => {
+        // Only a still can ride over the footage; a video overlay would mean
+        // compositing a second stream and deciding what to do with its audio.
+        if (mode === 'inline' && IMAGE_EXT.test(name)) {
+            const from = playhead;
+            const to = round3(Math.min(span.end, from + 2));
+            if (to - from < 0.5) {
+                setError('not enough clip left here for an inline overlay — move the playhead earlier.');
+                return;
+            }
+            setEdits((prev) => [...prev, {
+                id: newId(), type: 'overlay', from, to, src: name, ...OVERLAY_DEFAULT,
+            }]);
+            return;
+        }
         const insert = IMAGE_EXT.test(name)
             ? { id: newId(), type: 'insert', at: playhead, kind: 'image', src: name, ms: 1200, zoom: false }
             : { id: newId(), type: 'insert', at: playhead, kind: 'clip', src: name, start: 0, end: 2 };
         setEdits((prev) => [...prev, insert]);
+    };
+
+    // fill <-> inline on an edit that already exists, keeping its file.
+    const setEditMode = (edit, mode) => {
+        if (mode === 'inline' && edit.type === 'insert') {
+            const from = edit.at;
+            const to = round3(Math.min(span.end, from + 2));
+            if (to - from < 0.5) { setError('not enough clip left here to go inline.'); return; }
+            setEdits((prev) => prev.map((e) => (e.id === edit.id
+                ? { id: e.id, type: 'overlay', from, to, src: e.src, ...OVERLAY_DEFAULT } : e)));
+        } else if (mode === 'fill' && edit.type === 'overlay') {
+            setEdits((prev) => prev.map((e) => (e.id === edit.id
+                ? { id: e.id, type: 'insert', at: e.from, kind: 'image', src: e.src, ms: 1200, zoom: false } : e)));
+        }
     };
 
     const onPickFile = async (e) => {
@@ -282,6 +324,47 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     };
 
     const patchEdit = (id, patch) => setEdits((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+
+    // Overlays the playhead is standing inside — those are the ones the
+    // preview draws and lets you drag. A selected one shows regardless, so
+    // placing it does not depend on parking the playhead first.
+    const visibleOverlays = useMemo(() => edits.filter(
+        (e) => e.type === 'overlay'
+            && ((playhead >= e.from && playhead <= e.to) || e.id === draggingId)),
+    [edits, playhead, draggingId]);
+
+    // Drag to move, or drag the corner handle to resize. Fractions of the
+    // frame throughout, which is exactly what the recipe stores.
+    const startDrag = (edit, mode) => (down) => {
+        down.preventDefault();
+        down.stopPropagation();
+        const boxEl = down.currentTarget.closest('[data-frame]');
+        if (!boxEl) return;
+        const frame = boxEl.getBoundingClientRect();
+        const pointer = { x: down.clientX, y: down.clientY };
+        const origin = { x: edit.x, y: edit.y, w: edit.w };
+        setDraggingId(edit.id);
+        const onMove = (move) => {
+            const dx = (move.clientX - pointer.x) / frame.width;
+            const dy = (move.clientY - pointer.y) / frame.height;
+            if (mode === 'resize') {
+                const w = Math.min(OVERLAY_W_MAX, Math.max(OVERLAY_W_MIN, origin.w + dx));
+                patchEdit(edit.id, { w: round3(snapTo(w, [0.25, 0.5, 0.75, 1])) });
+                return;
+            }
+            const w = origin.w;
+            const x = snapTo(Math.min(1, Math.max(0, origin.x + dx)), [0, (1 - w) / 2, 1 - w]);
+            const y = snapTo(Math.min(1, Math.max(0, origin.y + dy)), [0, 0.5, 1 - w, 0.72]);
+            patchEdit(edit.id, { x: round3(x), y: round3(y) });
+        };
+        const onUp = () => {
+            setDraggingId(null);
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+    };
     const removeEdit = (id) => setEdits((prev) => prev.filter((e) => e.id !== id));
 
     // ---- apply ------------------------------------------------------------
@@ -332,6 +415,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                     {/* Left: preview + timeline */}
                     <div className="flex-1 min-w-0 flex flex-col gap-3">
                         <div
+                            data-frame
                             style={{ aspectRatio: String(videoAspect), width: `min(100%, calc(52vh * ${videoAspect}))` }}
                             className="relative bg-black rounded-card border border-rule overflow-hidden max-h-[52vh] mx-auto"
                         >
@@ -349,6 +433,30 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                             {overlay && overlay.type === 'insert' && overlay.kind === 'clip' && (
                                 <div className="absolute inset-0 flex items-center justify-center bg-black/85 text-ink2 text-sm pointer-events-none">clip “{overlay.src}” {(overlay.end - overlay.start).toFixed(1)} s</div>
                             )}
+                            {visibleOverlays.map((o) => (
+                                <div
+                                    key={o.id}
+                                    onPointerDown={startDrag(o, 'move')}
+                                    style={{
+                                        left: `${o.x * 100}%`,
+                                        top: `${o.y * 100}%`,
+                                        width: `${o.w * 100}%`,
+                                    }}
+                                    className={`absolute touch-none cursor-move ${draggingId === o.id ? 'outline outline-1 outline-brass' : 'hover:outline hover:outline-1 hover:outline-brass/60'}`}
+                                >
+                                    <img
+                                        src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
+                                        alt=""
+                                        draggable={false}
+                                        className="w-full h-auto select-none pointer-events-none"
+                                    />
+                                    <span
+                                        onPointerDown={startDrag(o, 'resize')}
+                                        className="absolute -right-1 -bottom-1 w-3 h-3 rounded-sm bg-brass cursor-nwse-resize touch-none"
+                                        title="drag to resize"
+                                    />
+                                </div>
+                            ))}
                             {simOverlay && simOverlay.type === 'pause' && (
                                 <div className="absolute top-3 left-1/2 -translate-x-1/2 px-2 py-1 rounded-input bg-black/70 text-brass text-[11px] pointer-events-none flex items-center gap-1"><Pause size={12} />{simOverlay.ms} ms</div>
                             )}
@@ -450,9 +558,30 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                 <Gauge size={18} className="text-brass shrink-0" />
                                 <span><span className="block text-sm">slow down</span><span className="block text-[11px] text-muted">the next 2 s at half speed (adjustable)</span></span>
                             </button>
+                            <div className="rounded-input border border-rule p-2 flex gap-1.5">
+                                <button
+                                    onClick={() => setInsertMode('fill')}
+                                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-input text-[12px] ${insertMode === 'fill' ? 'border border-brass bg-paper3 text-brass' : 'border border-rule hover:bg-paper3'}`}
+                                >
+                                    <Maximize2 size={13} />fill the frame
+                                </button>
+                                <button
+                                    onClick={() => setInsertMode('inline')}
+                                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-input text-[12px] ${insertMode === 'inline' ? 'border border-brass bg-paper3 text-brass' : 'border border-rule hover:bg-paper3'}`}
+                                >
+                                    <Layers size={13} />inline
+                                </button>
+                            </div>
                             <button className={BIG_BTN} onClick={() => fileRef.current?.click()} disabled={rendering || uploading}>
                                 {uploading ? <Loader2 size={18} className="animate-spin text-brass shrink-0" /> : <ImagePlus size={18} className="text-brass shrink-0" />}
-                                <span><span className="block text-sm">insert media</span><span className="block text-[11px] text-muted">an image or a piece of another video, spliced in here</span></span>
+                                <span>
+                                    <span className="block text-sm">insert media</span>
+                                    <span className="block text-[11px] text-muted">
+                                        {insertMode === 'inline'
+                                            ? 'an image over the footage — drag it where you want it (images only)'
+                                            : 'an image or a piece of another video, taking the whole frame'}
+                                    </span>
+                                </span>
                             </button>
                             <input ref={fileRef} type="file" accept={ACCEPT} className="hidden" onChange={onPickFile} />
                             {assets.length > 0 && (
@@ -474,6 +603,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                 {e.type === 'pause' && <>pause at {fmt(e.at)}</>}
                                                 {e.type === 'slow' && <>slow {fmt(e.from)} → {fmt(e.to)}</>}
                                                 {e.type === 'insert' && <>{e.kind} “{e.src}” at {fmt(e.at)}</>}
+                                                {e.type === 'overlay' && <>inline “{e.src}” {fmt(e.from)} → {fmt(e.to)}</>}
                                             </span>
                                             <button onClick={() => removeEdit(e.id)} className="text-muted hover:text-danger" title="remove"><Trash2 size={14} /></button>
                                         </div>
@@ -516,6 +646,31 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                     className="flex-1 accent-[var(--color-accent)]" />
                                                 <span className="readout w-14 text-right">{(e.ms / 1000).toFixed(1)} s</span>
                                                 <button onClick={() => patchEdit(e.id, { zoom: !e.zoom })} className={e.zoom ? CHIP_BTN_ON : CHIP_BTN}>zoom</button>
+                                                <button onClick={() => setEditMode(e, 'inline')} className={CHIP_BTN} title="show it over the footage instead">inline</button>
+                                            </div>
+                                        )}
+                                        {e.type === 'overlay' && (
+                                            <div className="flex flex-col gap-1.5">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className="text-muted">until</span>
+                                                    <input type="number" step="0.1" min={e.from + 0.5} max={span.end} value={e.to}
+                                                        onChange={(ev) => patchEdit(e.id, { to: round3(Math.min(span.end, Math.max(e.from + 0.5, parseFloat(ev.target.value) || e.to))) })}
+                                                        className="input-field w-20 text-[12px] py-0.5" />
+                                                    <span className="text-muted">s</span>
+                                                    <button onClick={() => setEditMode(e, 'fill')} className={CHIP_BTN} title="give it the whole frame instead">fill</button>
+                                                </div>
+                                                <label className="flex items-center gap-2">
+                                                    <span className="text-muted">size</span>
+                                                    <input type="range" min={OVERLAY_W_MIN} max={OVERLAY_W_MAX} step="0.01" value={e.w}
+                                                        onChange={(ev) => patchEdit(e.id, { w: round3(Number(ev.target.value)) })}
+                                                        className="flex-1 accent-brass" />
+                                                    <span className="readout w-10 text-right">{Math.round(e.w * 100)}%</span>
+                                                </label>
+                                                <p className="text-[11px] text-muted">
+                                                    {playhead >= e.from && playhead <= e.to
+                                                        ? 'drag it on the preview; the corner handle resizes it.'
+                                                        : 'move the playhead into its range to drag it on the preview.'}
+                                                </p>
                                             </div>
                                         )}
                                         {e.type === 'insert' && e.kind === 'clip' && (
