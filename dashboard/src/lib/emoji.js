@@ -1,0 +1,192 @@
+// The emoji catalogue behind the picker. A static list rather than a picker
+// library: this is a grid of characters, and the smallest emoji-data package
+// is larger than the whole dashboard bundle.
+//
+// Each entry is [character, keywords]. Keywords are what the search box
+// matches, so they carry the words people actually type ("lol", "cash",
+// "check") rather than the Unicode name.
+
+export const EMOJI_GROUPS = [
+    {
+        name: 'reactions',
+        emoji: [
+            ['😂', 'lol laugh cry funny joy'],
+            ['🤣', 'rofl lol laugh floor funny'],
+            ['😅', 'sweat laugh nervous phew'],
+            ['😊', 'smile happy blush warm'],
+            ['😍', 'love heart eyes adore'],
+            ['🥰', 'love adore hearts affection'],
+            ['😎', 'cool sunglasses confident'],
+            ['🤩', 'star struck wow amazed excited'],
+            ['🥳', 'party celebrate birthday'],
+            ['🤔', 'think hmm consider wonder'],
+            ['😳', 'shock flushed surprised oops'],
+            ['😮', 'wow surprise open mouth gasp'],
+            ['🤯', 'mind blown explode shocked'],
+            ['😱', 'scream shock horror fear'],
+            ['🙄', 'eye roll annoyed whatever'],
+            ['😴', 'sleep tired bored zzz'],
+            ['🤗', 'hug welcome friendly'],
+            ['🫡', 'salute respect yes sir'],
+            ['🤫', 'quiet shh secret hush'],
+            ['🤨', 'suspicious eyebrow doubt really'],
+            ['😬', 'grimace awkward yikes'],
+            ['🥺', 'pleading please puppy eyes'],
+            ['😭', 'cry sob sad tears'],
+            ['😤', 'determined steam frustrated'],
+        ],
+    },
+    {
+        name: 'hands',
+        emoji: [
+            ['👍', 'thumbs up yes good approve like'],
+            ['👎', 'thumbs down no bad disapprove'],
+            ['👏', 'clap applause bravo well done'],
+            ['🙌', 'praise hands up celebrate yay'],
+            ['🙏', 'please thanks pray grateful'],
+            ['👌', 'ok perfect nice fine'],
+            ['🤝', 'handshake deal agree partner'],
+            ['✌️', 'peace victory two'],
+            ['🤞', 'fingers crossed luck hope'],
+            ['💪', 'strong muscle power flex'],
+            ['👋', 'wave hi hello bye'],
+            ['🫵', 'you point pointing at you'],
+            ['👉', 'point right this arrow'],
+            ['👈', 'point left that arrow'],
+            ['👇', 'point down below link'],
+            ['☝️', 'point up one attention'],
+        ],
+    },
+    {
+        name: 'hearts',
+        emoji: [
+            ['❤️', 'red heart love'],
+            ['🧡', 'orange heart love'],
+            ['💛', 'yellow heart love'],
+            ['💚', 'green heart love'],
+            ['💙', 'blue heart love'],
+            ['💜', 'purple heart love'],
+            ['🖤', 'black heart love dark'],
+            ['🤍', 'white heart love clean'],
+            ['💖', 'sparkle heart love shiny'],
+            ['💯', 'hundred perfect score keep it real'],
+            ['💔', 'broken heart sad breakup'],
+            ['❣️', 'heart exclamation love'],
+        ],
+    },
+    {
+        name: 'celebrate',
+        emoji: [
+            ['🔥', 'fire hot lit trending best'],
+            ['✨', 'sparkles shine new magic'],
+            ['🎉', 'party popper celebrate launch'],
+            ['🎊', 'confetti celebrate party'],
+            ['🚀', 'rocket launch growth fast ship'],
+            ['⭐', 'star favourite rating'],
+            ['🌟', 'glowing star shine special'],
+            ['🏆', 'trophy win award first'],
+            ['🥇', 'gold medal first winner'],
+            ['🎯', 'target bullseye goal aim'],
+            ['💥', 'boom impact explosion'],
+            ['🎁', 'gift present offer bonus'],
+            ['🎈', 'balloon party celebrate'],
+            ['👑', 'crown king queen best royal'],
+        ],
+    },
+    {
+        name: 'business',
+        emoji: [
+            ['💰', 'money bag cash profit rich'],
+            ['💵', 'dollar cash money bill'],
+            ['💸', 'money flying spend cost'],
+            ['💳', 'card credit pay checkout'],
+            ['🏷️', 'tag price label discount'],
+            ['🛒', 'cart shop buy checkout'],
+            ['🛍️', 'shopping bags buy retail'],
+            ['📈', 'chart up growth increase sales'],
+            ['📉', 'chart down decrease loss drop'],
+            ['📊', 'bar chart data stats report'],
+            ['💼', 'briefcase work business job'],
+            ['📦', 'package box shipping delivery'],
+            ['🧾', 'receipt invoice bill'],
+            ['🤑', 'money face rich profit'],
+            ['⏰', 'alarm clock time deadline hurry'],
+            ['⏳', 'hourglass time running out wait'],
+        ],
+    },
+    {
+        name: 'marks',
+        emoji: [
+            ['✅', 'check tick done yes correct'],
+            ['❌', 'cross no wrong error remove'],
+            ['⚠️', 'warning caution careful alert'],
+            ['❗', 'exclamation important attention'],
+            ['❓', 'question ask what'],
+            ['🚫', 'no forbidden stop banned'],
+            ['🔔', 'bell notify subscribe alert'],
+            ['🔊', 'sound loud volume audio'],
+            ['📣', 'megaphone announce shout news'],
+            ['💡', 'idea lightbulb tip insight'],
+            ['🔗', 'link url chain connect'],
+            ['📌', 'pin pinned important note'],
+            ['👀', 'eyes look watch see attention'],
+            ['🆕', 'new fresh badge'],
+            ['🔝', 'top best up'],
+            ['🆓', 'free no cost'],
+        ],
+    },
+    {
+        name: 'things',
+        emoji: [
+            ['📱', 'phone mobile smartphone'],
+            ['💻', 'laptop computer work'],
+            ['📷', 'camera photo picture'],
+            ['🎥', 'movie camera video film'],
+            ['🎬', 'clapper film action shoot'],
+            ['🎤', 'mic microphone speak sing'],
+            ['🎧', 'headphones audio listen music'],
+            ['🎵', 'music note song audio'],
+            ['📝', 'note write memo edit'],
+            ['📚', 'books read learn study'],
+            ['🔍', 'search magnify find look'],
+            ['🔒', 'lock secure private safe'],
+            ['🗝️', 'key unlock access secret'],
+            ['🧠', 'brain smart think mind'],
+            ['⚙️', 'gear settings config tool'],
+            ['🧪', 'test tube experiment science'],
+        ],
+    },
+    {
+        name: 'life',
+        emoji: [
+            ['☀️', 'sun sunny day weather'],
+            ['🌙', 'moon night sleep'],
+            ['🌈', 'rainbow colour pride hope'],
+            ['🌊', 'wave water sea ocean'],
+            ['🌱', 'seedling grow new plant'],
+            ['🌸', 'blossom flower spring pink'],
+            ['🐶', 'dog puppy pet'],
+            ['🐱', 'cat kitten pet'],
+            ['☕', 'coffee cafe morning drink'],
+            ['🍕', 'pizza food slice'],
+            ['🍔', 'burger food fast'],
+            ['🍰', 'cake dessert sweet birthday'],
+            ['🍎', 'apple fruit healthy'],
+            ['🥑', 'avocado food healthy'],
+            ['🍻', 'beers cheers drink celebrate'],
+            ['✈️', 'plane travel flight trip'],
+        ],
+    },
+];
+
+export const ALL_EMOJI = EMOJI_GROUPS.flatMap((g) => g.emoji);
+
+/** Entries whose keywords contain every whitespace-separated term in `query`. */
+export function searchEmoji(query) {
+    const terms = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return null; // null = "show the groups", not "no results"
+    return ALL_EMOJI.filter(([char, words]) => {
+        const hay = `${char} ${words}`.toLowerCase();
+        return terms.every((t) => hay.includes(t));
+    });
+}

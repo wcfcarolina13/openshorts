@@ -30,6 +30,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
+import giphy
 import layout_ranges
 
 load_dotenv()
@@ -2253,6 +2254,42 @@ async def list_job_assets(job_id: str):
     names = sorted(n for n in os.listdir(folder) if not n.endswith(".part"))
     return {"assets": [{"name": n, "bytes": os.path.getsize(os.path.join(folder, n))}
                        for n in names]}
+
+
+@app.get("/api/gifs/search")
+async def search_gifs(q: str = "", limit: int = 24,
+                      x_giphy_key: Optional[str] = Header(None)):
+    """Proxy GIPHY's search (trending when q is empty) so the API key stays on
+    the server. Tenor would be Discord's source, but it stopped issuing keys in
+    Jan 2026 and was decommissioned that June."""
+    try:
+        return {"gifs": await giphy.search(q, limit, key_override=x_giphy_key),
+                "attribution": "POWERED BY GIPHY"}
+    except giphy.GiphyError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@app.post("/api/jobs/{job_id}/gifs/{gif_id}", status_code=201)
+async def import_gif(job_id: str, gif_id: str,
+                     x_giphy_key: Optional[str] = Header(None)):
+    """Copy one GIPHY GIF into the job's assets folder and return its name.
+
+    Takes an id, never a URL: giphy.fetch looks the id up and refuses any media
+    host outside giphy.com, which is what keeps this off the internal network.
+    """
+    _require_job_dir(job_id)
+    try:
+        data = await giphy.fetch(gif_id, key_override=x_giphy_key)
+    except giphy.GiphyError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    name = giphy.asset_name(gif_id)
+    folder = _assets_dir(job_id)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, name)
+    with open(path + ".part", "wb") as f:
+        f.write(data)
+    os.replace(path + ".part", path)
+    return {"name": name, "bytes": len(data)}
 
 
 @app.delete("/api/uploads/{upload_id}")

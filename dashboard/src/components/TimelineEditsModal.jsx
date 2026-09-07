@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Pause, Gauge, ImagePlus, Trash2, Loader2, AlertCircle, Layers, Maximize2 } from 'lucide-react';
+import { Pause, Gauge, ImagePlus, Trash2, Loader2, AlertCircle, Layers, Maximize2, Smile, Clapperboard } from 'lucide-react';
 import Modal from './ui/Modal';
+import EmojiPicker from './EmojiPicker';
+import GifPicker from './GifPicker';
+import { readGiphyKey } from '../lib/giphyKey';
+import { emojiToPng, emojiFileName } from '../lib/emojiRaster';
 import { getApiUrl } from '../config';
 import { apiFetch, apiJson } from '../lib/api';
 import {
@@ -24,6 +28,8 @@ const SPEED_STEP = 0.05;
 const OVERLAY_W_MIN = 0.05;
 const OVERLAY_W_MAX = 1;
 const OVERLAY_DEFAULT = { x: 0.06, y: 0.72, w: 0.28 };
+// An emoji reads at a glance, so it wants a smaller box than a logo does.
+const EMOJI_DEFAULT = { x: 0.7, y: 0.08, w: 0.18 };
 const SNAP = 0.02;
 const snapTo = (value, targets) => {
     const hit = targets.find((t) => Math.abs(value - t) < SNAP);
@@ -63,6 +69,8 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     // Which uploaded file the next insert uses, and whether it fills the
     // frame (its own stretch of timeline) or sits inline over the footage.
     const [insertMode, setInsertMode] = useState('fill');
+    // Which media picker is open under the insert buttons: null | 'emoji' | 'gif'.
+    const [picker, setPicker] = useState(null);
     const [draggingId, setDraggingId] = useState(null);
     const [rendering, setRendering] = useState(false);
     const [renderSeconds, setRenderSeconds] = useState(0);
@@ -261,7 +269,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         setEdits((prev) => [...prev, { id: newId(), type: 'slow', from, to, factor: 0.5 }]);
     };
 
-    const addInsertFor = (name, mode = insertMode) => {
+    const addInsertFor = (name, mode = insertMode, box = OVERLAY_DEFAULT) => {
         // Anything we accept can ride over the footage: a still is held for
         // the window, a GIF or a video loops through it. Overlay audio is
         // dropped by the renderer so the speaker underneath stays audible.
@@ -273,7 +281,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                 return;
             }
             setEdits((prev) => [...prev, {
-                id: newId(), type: 'overlay', from, to, src: name, ...OVERLAY_DEFAULT,
+                id: newId(), type: 'overlay', from, to, src: name, ...box,
             }]);
             return;
         }
@@ -298,33 +306,73 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         }
     };
 
-    const onPickFile = async (e) => {
-        const file = e.target.files?.[0];
-        e.target.value = '';
-        if (!file) return;
+    // Every media route ends here: store the bytes under the job, remember the
+    // asset, and hand back what the server called it.
+    const uploadAsset = async (body, name, contentType) => {
+        const res = await apiFetch(`/api/jobs/${jobId}/assets/${encodeURIComponent(name)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': contentType || 'application/octet-stream' },
+            body,
+        });
+        if (!res.ok) {
+            let detail = `upload failed (HTTP ${res.status})`;
+            try { detail = (await res.json()).detail || detail; } catch { /* keep */ }
+            throw new Error(detail);
+        }
+        const saved = await res.json();
+        setAssets((prev) => [...prev.filter((a) => a.name !== saved.name), saved]);
+        return saved;
+    };
+
+    // One busy flag for all three: they all end in an upload and a placement.
+    const withUpload = async (what, run) => {
         setUploading(true);
         setError(null);
         try {
-            const name = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
-            const res = await apiFetch(`/api/jobs/${jobId}/assets/${encodeURIComponent(name)}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': file.type || 'application/octet-stream' },
-                body: file,
-            });
-            if (!res.ok) {
-                let detail = `upload failed (HTTP ${res.status})`;
-                try { detail = (await res.json()).detail || detail; } catch { /* keep */ }
-                throw new Error(detail);
-            }
-            const saved = await res.json();
-            setAssets((prev) => [...prev.filter((a) => a.name !== saved.name), saved]);
-            addInsertFor(saved.name);
+            await run();
         } catch (err) {
-            setError(err.message || 'upload failed');
+            setError(err.message || `could not add that ${what}`);
         } finally {
             setUploading(false);
         }
     };
+
+    const onPickFile = async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        await withUpload('file', async () => {
+            const name = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
+            const saved = await uploadAsset(file, name, file.type);
+            addInsertFor(saved.name);
+        });
+    };
+
+    // The emoji is drawn by THIS browser's emoji font and uploaded as a
+    // transparent PNG, so what is in the grid is what lands in the clip.
+    const addEmoji = (char) => withUpload('emoji', async () => {
+        const png = await emojiToPng(char);
+        const saved = await uploadAsset(png, emojiFileName(char), 'image/png');
+        addInsertFor(saved.name, 'inline', EMOJI_DEFAULT);
+        setPicker(null);
+    });
+
+    // The server does the download, and it takes GIPHY's id — never a URL.
+    const addGif = (gif) => withUpload('gif', async () => {
+        const key = readGiphyKey();
+        const res = await apiFetch(`/api/jobs/${jobId}/gifs/${encodeURIComponent(gif.id)}`, {
+            method: 'POST', headers: key ? { 'X-Giphy-Key': key } : {},
+        });
+        if (!res.ok) {
+            let detail = `could not add that gif (HTTP ${res.status})`;
+            try { detail = (await res.json()).detail || detail; } catch { /* keep */ }
+            throw new Error(detail);
+        }
+        const saved = await res.json();
+        setAssets((prev) => [...prev.filter((a) => a.name !== saved.name), saved]);
+        addInsertFor(saved.name);
+        setPicker(null);
+    });
 
     const patchEdit = (id, patch) => setEdits((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 
@@ -598,6 +646,24 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                 </span>
                             </button>
                             <input ref={fileRef} type="file" accept={ACCEPT} className="hidden" onChange={onPickFile} />
+                            <div className="flex gap-1.5">
+                                <button
+                                    onClick={() => setPicker(picker === 'emoji' ? null : 'emoji')}
+                                    disabled={rendering || uploading}
+                                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-input text-[12px] disabled:opacity-40 ${picker === 'emoji' ? 'border border-brass bg-paper3 text-brass' : 'border border-rule hover:bg-paper3'}`}
+                                >
+                                    <Smile size={13} />emoji
+                                </button>
+                                <button
+                                    onClick={() => setPicker(picker === 'gif' ? null : 'gif')}
+                                    disabled={rendering || uploading}
+                                    className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-input text-[12px] disabled:opacity-40 ${picker === 'gif' ? 'border border-brass bg-paper3 text-brass' : 'border border-rule hover:bg-paper3'}`}
+                                >
+                                    <Clapperboard size={13} />gif
+                                </button>
+                            </div>
+                            {picker === 'emoji' && <EmojiPicker onPick={addEmoji} busy={uploading} />}
+                            {picker === 'gif' && <GifPicker onPick={addGif} busy={uploading} />}
                             {assets.length > 0 && (
                                 <select className="input-field text-sm" value="" onChange={(e) => { if (e.target.value) addInsertFor(e.target.value); }}>
                                     <option value="">insert an uploaded file…</option>

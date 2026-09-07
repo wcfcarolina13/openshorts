@@ -580,6 +580,38 @@ class TestSampleRateAlignment:
         assert hold[hold.index("-filter_complex") + 1].endswith(",fps=25[v]")
 
 
+class TestFillModeGifs:
+    """A .gif is in IMAGE_EXTENSIONS but is not a still: a fill-mode insert
+    used to render its frozen first frame."""
+
+    def _cmd(self, tmp_path, name, **seg):
+        (tmp_path / name).write_bytes(b"x")
+        return recut.cut_commands(
+            "in.mp4", [{"kind": "image", "src": name, "ms": 1200, **seg}],
+            ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
+
+    def test_a_gif_insert_animates_and_repeats(self, tmp_path):
+        cmd = self._cmd(tmp_path, "wave.gif")
+        assert cmd[2:5] == ["-ignore_loop", "0", "-i"]
+        assert "-loop" not in cmd
+        # -t is what ends the part, since -ignore_loop 0 never does
+        assert cmd[cmd.index("-t") + 1] == "1.2"
+
+    def test_zoom_is_ignored_for_a_gif(self, tmp_path):
+        cmd = self._cmd(tmp_path, "wave.gif", zoom=True)
+        assert "zoompan" not in cmd[cmd.index("-filter_complex") + 1]
+        assert cmd[2:4] == ["-ignore_loop", "0"]
+
+    def test_a_still_insert_is_unchanged(self, tmp_path):
+        cmd = self._cmd(tmp_path, "logo.png")
+        assert cmd[2:4] == ["-loop", "1"]
+        assert "-ignore_loop" not in cmd
+
+    def test_a_still_insert_still_zooms(self, tmp_path):
+        cmd = self._cmd(tmp_path, "logo.png", zoom=True)
+        assert "zoompan" in cmd[cmd.index("-filter_complex") + 1]
+
+
 class TestInlineOverlays:
     """An inline overlay rides on the source segment under it: it changes how
     that part is rendered, never how long the clip runs."""

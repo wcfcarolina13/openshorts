@@ -537,7 +537,13 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
             path = asset_path(assets_dir, seg["src"])
             seconds = seg["ms"] / 1000.0
             frames = max(1, int(round(seconds * fps)))
-            if seg.get("zoom"):
+            if os.path.splitext(path)[1].lower() == ".gif":
+                # A GIF lives in IMAGE_EXTENSIONS but is not a still. Repeat it
+                # for the insert's length (the output -t below ends the part)
+                # and ignore zoom — a Ken Burns push over an animation is noise.
+                fc = f"[0:v]{_fit_filter(width, height)},fps={fps:g}[v]"
+                inputs = ["-ignore_loop", "0", "-i", path]
+            elif seg.get("zoom"):
                 fc = (f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
                       f"crop={width}:{height},zoompan=z='1+0.15*on/{frames}':d={frames}:"
                       f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps:g},"
