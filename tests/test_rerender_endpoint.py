@@ -390,3 +390,56 @@ class TestRerenderKinds:
             "segments": [{"start": 10, "end": 20},
                          {"kind": "image", "src": "missing.png", "ms": 1000}]})
         assert resp.status_code == 400
+
+
+class TestRerenderKeepsStyling:
+    """A recut is cut from the CLEAN file; the burned hook and the remembered
+    caption style must be put back on top, hook first."""
+
+    def test_hook_and_caption_style_reapplied_after_recut(self, job, monkeypatch):
+        meta = json.loads(job["meta_path"].read_text())
+        meta["shorts"][0]["auto_hook"] = {"text": "Big news", "style": "yellow", "position": "top",
+                                          "duration_seconds": 4.0, "size": "L"}
+        meta["shorts"][0]["caption_style"] = {"font_name": "Verdana", "highlight_color": "#FF69B4", "uppercase": False}
+        job["meta_path"].write_text(json.dumps(meta))
+
+        calls = []
+
+        def fake_recut(**kwargs):
+            calls.append(("recut", kwargs.get("captions_transcript")))
+            name = f"recut_1_{kwargs['clean_name']}"
+            open(os.path.join(kwargs["output_dir"], name), "wb").write(b"recut")
+            return name, name
+
+        def fake_hook(src, text, dst, **kw):
+            calls.append(("hook", os.path.basename(src), text, kw.get("style"), kw.get("font_scale")))
+            open(dst, "wb").write(b"hooked")
+
+        def fake_caption(path, transcript, start, end, split_ranges=None, style_overrides=None):
+            calls.append(("caption", os.path.basename(path), style_overrides))
+            out = os.path.join(os.path.dirname(path), f"subtitled_9_{os.path.basename(path)}")
+            open(out, "wb").write(b"cap")
+            return out
+
+        import main as main_module
+        monkeypatch.setattr(recut, "perform_recut", fake_recut)
+        monkeypatch.setattr(app_module, "add_hook_to_video", fake_hook)
+        monkeypatch.setattr(main_module, "auto_caption_clip", fake_caption)
+
+        resp = _request("POST", "/api/clip/rerender", {
+            "job_id": JOB_ID, "clip_index": 0,
+            "segments": [{"start": 12, "end": 22}]})
+        assert resp.status_code == 200, resp.text
+        # perform_recut did NOT burn default captions (we finish the chain here)
+        assert calls[0] == ("recut", None)
+        assert calls[1][:4] == ("hook", "recut_1_mytitle_clip_1.mp4", "Big news", "yellow") and calls[1][4] == 1.3
+        assert calls[2][0] == "caption" and calls[2][1].startswith("hooked_") and calls[2][2]["highlight_color"] == "#FF69B4"
+        served = resp.json()["new_video_url"].split("/")[-1]
+        assert served.startswith("subtitled_9_hooked_") and served.endswith("recut_1_mytitle_clip_1.mp4")
+
+    def test_plain_clip_keeps_the_old_path(self, job, fake_recut):
+        resp = _request("POST", "/api/clip/rerender", {
+            "job_id": JOB_ID, "clip_index": 0, "segments": [{"start": 12, "end": 22}]})
+        assert resp.status_code == 200
+        # No hook, no remembered style: captions still come from perform_recut itself.
+        assert fake_recut[0]["captions_transcript"] is not None

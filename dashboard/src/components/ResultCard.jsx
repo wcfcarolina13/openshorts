@@ -55,7 +55,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
     // subtitled file (double-subtitle bug).
     const stripBurns = (filename) => {
         let f = filename || '', prev;
-        do { prev = f; f = f.replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
+        do { prev = f; f = f.replace(/^subtitled_\d+_/, '').replace(/^browser_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
         return f;
     };
     const originalVideoUrl = getApiUrl((clip.video_url || '').replace(/[^/]+$/, stripBurns((clip.video_url || '').split('/').pop())));
@@ -229,7 +229,30 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
     // True when the current server file already carries burned-in content.
     // Browser (Remotion) renders compose over the ORIGINAL clip, so using them
     // here would silently drop those burns — chain via server FFmpeg instead.
-    const hasServerBurns = /(^|_)(subtitled|hook|hooked)_/.test(serverVideoFile || '');
+    const hasServerBurns = /(^|_)(subtitled|hook|hooked|browser)_/.test(serverVideoFile || '');
+
+    // A Remotion render used to live only in this tab (blob: URL): a reload,
+    // a reopen, a download or a post all fell back to the server's older file.
+    // Save it as the clip's current version so every surface agrees.
+    const persistBrowserRender = async (blobUrl) => {
+        try {
+            const blob = await fetch(blobUrl).then((r) => r.blob());
+            const res = await apiFetch(`/api/jobs/${jobId}/clips/${index}/render`, {
+                method: 'PUT', headers: { 'Content-Type': 'video/mp4' }, body: blob,
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setServerVideoFile(data.file);
+            }
+        } catch (e) {
+            console.warn('could not save the browser render to the server', e);
+        }
+    };
+    const showBrowserRender = (blobUrl) => {
+        setCurrentVideoUrl(blobUrl);
+        if (videoRef.current) videoRef.current.load();
+        persistBrowserRender(blobUrl);
+    };
 
     // The hook currently burned into the server file (auto-hook or a manual
     // one). /api/hook REPLACES it; tracked locally so the modal stays honest
@@ -323,8 +346,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                         hook: newLayers.hook,
                         effects: newLayers.effects,
                     });
-                    setCurrentVideoUrl(blobUrl);
-                    if (videoRef.current) videoRef.current.load();
+                    showBrowserRender(blobUrl);
                     return;
                 }
             }
@@ -392,7 +414,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                 const remaining = { ...activeLayers, subtitles: null };
                 setActiveLayers(remaining);
                 if (remaining.hook || remaining.effects) {
-                    setCurrentVideoUrl(await renderInBrowser({
+                    showBrowserRender(await renderInBrowser({
                     ...videoDims,
                         videoUrl: serverUrl,
                         durationInSeconds: clipDuration,
@@ -433,8 +455,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                     hook: newLayers.hook,
                     effects: newLayers.effects,
                 });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
+                showBrowserRender(blobUrl);
                 setShowSubtitleModal(false);
                 return;
             }
@@ -485,7 +506,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                         hook: remaining.hook,
                         effects: remaining.effects,
                     });
-                    setCurrentVideoUrl(blobUrl);
+                    showBrowserRender(blobUrl);
                 } else {
                     setCurrentVideoUrl(serverUrl);
                 }
@@ -516,8 +537,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                     hook: newLayers.hook,
                     effects: newLayers.effects,
                 });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
+                showBrowserRender(blobUrl);
                 setShowHookModal(false);
                 return;
             }

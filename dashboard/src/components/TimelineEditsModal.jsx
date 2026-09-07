@@ -169,7 +169,13 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         // timeupdate is the safety net: if this effect re-attached while the
         // video was already playing (no new 'play' event), the loop restarts.
         const onTimeUpdate = () => { if (!sim.loop && !v.paused && !v.ended) onPlay(); };
-        const onSeeked = () => { sim.fired.clear(); sim.lastSrc = renderedToSource(v.currentTime, renderedSegments); };
+        const onSeeked = () => {
+            sim.fired.clear();
+            sim.lastSrc = renderedToSource(v.currentTime, renderedSegments);
+            // Scrubbing the player is the natural way to pick a moment, so it
+            // moves the source playhead too (the bar and word chips still work).
+            if (v.paused) setPlayhead(round3(sim.lastSrc));
+        };
         const onEnded = () => { sim.fired.clear(); v.playbackRate = 1; };
         v.addEventListener('play', onPlay);
         v.addEventListener('playing', onPlay);
@@ -207,6 +213,11 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         seekTo(span.start + frac * (span.end - span.start));
     };
     const pct = (t) => `${((t - span.start) / (span.end - span.start || 1)) * 100}%`;
+    // An unapplied insert whose anchor is where the playhead stands: show it
+    // right away, so "insert media" gives feedback without pressing play.
+    const standingOn = useMemo(() => pendingEdits.find(
+        (e) => e.type === 'insert' && Math.abs(e.at - playhead) < 0.05) || null, [pendingEdits, playhead]);
+    const overlay = simOverlay || standingOn;
 
     // ---- edit actions -----------------------------------------------------
     const addPause = () => setEdits((prev) => [...prev, { id: newId(), type: 'pause', at: playhead, ms: 100 }]);
@@ -306,11 +317,11 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                     <div className="flex-1 min-w-0 flex flex-col gap-3">
                         <div className="relative bg-black rounded-card border border-rule overflow-hidden aspect-[9/16] max-h-[52vh] mx-auto w-full">
                             <video ref={videoRef} src={previewUrl} className="w-full h-full object-contain" controls playsInline />
-                            {simOverlay && simOverlay.type === 'insert' && simOverlay.kind === 'image' && (
-                                <img src={getApiUrl(`/videos/${jobId}/assets/${simOverlay.src}`)} alt="" className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none" />
+                            {overlay && overlay.type === 'insert' && overlay.kind === 'image' && (
+                                <img src={getApiUrl(`/videos/${jobId}/assets/${overlay.src}`)} alt="" className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none" />
                             )}
-                            {simOverlay && simOverlay.type === 'insert' && simOverlay.kind === 'clip' && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/85 text-ink2 text-sm pointer-events-none">clip “{simOverlay.src}” {(simOverlay.end - simOverlay.start).toFixed(1)} s</div>
+                            {overlay && overlay.type === 'insert' && overlay.kind === 'clip' && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/85 text-ink2 text-sm pointer-events-none">clip “{overlay.src}” {(overlay.end - overlay.start).toFixed(1)} s</div>
                             )}
                             {simOverlay && simOverlay.type === 'pause' && (
                                 <div className="absolute top-3 left-1/2 -translate-x-1/2 px-2 py-1 rounded-input bg-black/70 text-brass text-[11px] pointer-events-none flex items-center gap-1"><Pause size={12} />{simOverlay.ms} ms</div>
@@ -362,7 +373,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                     <div className="w-full md:w-[340px] shrink-0 flex flex-col gap-4">
                         <div>
                             {clipTitle && <p className="text-[12px] text-muted truncate mb-2" title={clipTitle}>{clipTitle}</p>}
-                            <p className="eyebrow mb-1">At</p>
+                            <p className="eyebrow mb-1">At · scrub the player, click the bar, or click a word</p>
                             <p className="text-lg">
                                 {fmt(playhead)}
                                 {wordAtPlayhead && <span className="text-muted text-sm"> · after “{wordAtPlayhead}”</span>}

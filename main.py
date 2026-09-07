@@ -982,7 +982,8 @@ def finalize_clip_passthrough(input_video, final_output_video):
     return True
 
 
-def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=None):
+def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=None,
+                      style_overrides=None):
     """Burn the default caption style onto a finished clip.
 
     ``split_ranges``: (start, end) stretches, in clip seconds, rendered with
@@ -1009,7 +1010,10 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
         return None  # silent video: nothing to caption
     try:
         import subtitles as _subs
-        style = _subs.AUTO_CAPTION_STYLE
+        # ``style_overrides``: the style the user last chose in the subtitle
+        # modal (persisted on the clip), so a recut/hook re-caption keeps the
+        # look instead of snapping back to the pipeline default.
+        style = {**_subs.AUTO_CAPTION_STYLE, **{k: v for k, v in (style_overrides or {}).items() if v is not None}}
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
         generation_id = int(time.time())

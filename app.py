@@ -491,7 +491,10 @@ def _canonical_clip_file(output_dir, base_name, index):
         derived = (glob.glob(os.path.join(output_dir, f"subtitled_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
-                   + glob.glob(os.path.join(output_dir, f"hook_{clean}")))
+                   + glob.glob(os.path.join(output_dir, f"hook_{clean}"))
+                   # browser_<ts>_: a Remotion render the dashboard saved back
+                   # (self-host), so reloads and downloads see the styled clip.
+                   + glob.glob(os.path.join(output_dir, f"browser_*_{clean}")))
     except Exception:
         derived = []
     if not derived:
@@ -508,7 +511,7 @@ def _strip_burned_captions(output_dir, filename):
     version).
     """
     while True:
-        m = re.match(r'^subtitled_\d+_(.+)$', filename)
+        m = re.match(r'^(?:subtitled|browser)_\d+_(.+)$', filename)
         if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
             return filename
         filename = m.group(1)
@@ -553,13 +556,14 @@ def _reapply_captions(job_id, clip_index, video_path):
         # start..end window is wrong for it — caption against the clip-relative
         # remapped transcript instead (same trick /api/subtitle uses).
         recipe_segments = (clip.get('recipe') or {}).get('segments')
+        style = clip.get('caption_style')
         if recipe_segments:
             v_transcript = recut.virtual_transcript(transcript, recipe_segments)
             return _main.auto_caption_clip(
                 video_path, v_transcript, 0.0,
-                recut.total_duration(recipe_segments))
+                recut.total_duration(recipe_segments), style_overrides=style)
         return _main.auto_caption_clip(video_path, transcript,
-                                       clip['start'], clip['end'])
+                                       clip['start'], clip['end'], style_overrides=style)
     except Exception as e:
         print(f"⚠️  Could not re-apply captions to {video_path}: {e}")
         return None
@@ -2091,6 +2095,103 @@ async def put_upload(upload_id: str, request: Request):
             "hint": "Now call /api/process with upload_id."}
 
 
+# --- Self-host persistence for browser-side (Remotion) renders and the
+# per-clip edit state. On the hosted product these live in R2 + Postgres; on
+# self-host they used to live only in the open tab, so a reload lost them.
+RENDER_MAX_BYTES = int(os.environ.get("RENDER_MAX_BYTES", str(500 * 1024 * 1024)))
+
+
+def _project_state_path(job_id: str) -> str:
+    return os.path.join(OUTPUT_DIR, job_id, "project_state.json")
+
+
+def _read_project_state(job_id: str):
+    try:
+        with open(_project_state_path(job_id)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _set_clip_video_url(job_id: str, clip_index: int, filename: str) -> str:
+    """Point clip ``clip_index`` at ``filename`` in metadata.json and in the
+    in-memory job, the two places every reader consults."""
+    url = f"/videos/{job_id}/{filename}"
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    for meta_path in glob.glob(os.path.join(job_dir, "*_metadata.json")):
+        try:
+            with open(meta_path) as f:
+                data = json.load(f)
+            shorts = data.get("shorts") or []
+            if clip_index < len(shorts):
+                shorts[clip_index]["video_url"] = url
+                with open(meta_path, "w") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        except (OSError, ValueError) as e:
+            print(f"⚠️  Could not update metadata for {job_id}: {e}")
+    job = jobs.get(job_id)
+    clips = ((job or {}).get("result") or {}).get("clips") or []
+    if clip_index < len(clips):
+        clips[clip_index]["video_url"] = url
+    return url
+
+
+@app.put("/api/jobs/{job_id}/clips/{clip_index}/render")
+async def put_browser_render(job_id: str, clip_index: int, request: Request):
+    """Save a dashboard-rendered MP4 as the clip's current version
+    (``browser_<ts>_<clean>``), so reloads, reopen, download and post all use it."""
+    _require_job_dir(job_id)
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    json_files = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
+    clean = f"{base_name}_clip_{clip_index + 1}.mp4"
+    if not os.path.exists(os.path.join(job_dir, clean)):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    name = f"browser_{int(time.time())}_{clean}"
+    path = os.path.join(job_dir, name)
+    size = 0
+    try:
+        with open(path + ".part", "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > RENDER_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail=f"render exceeds {RENDER_MAX_BYTES} bytes")
+                f.write(chunk)
+        with open(path + ".part", "rb") as f:
+            head = f.read(12)
+        if size < 1024 or head[4:8] != b"ftyp":
+            raise HTTPException(status_code=400, detail="body is not an MP4 file")
+    except HTTPException:
+        if os.path.exists(path + ".part"):
+            os.remove(path + ".part")
+        raise
+    os.replace(path + ".part", path)
+    url = _set_clip_video_url(job_id, clip_index, name)
+    return {"file": name, "video_url": url, "bytes": size}
+
+
+@app.put("/api/local/projects/{job_id}/state")
+async def put_local_project_state(job_id: str, request: Request):
+    """Persist the dashboard's per-clip edit state (Remotion layers + current
+    server file) next to the job, merged by clip index."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    _require_job_dir(job_id)
+    body = await request.json()
+    state = _read_project_state(job_id) or {"clips": []}
+    by_index = {c.get("index"): c for c in state.get("clips", []) if isinstance(c, dict)}
+    for c in (body or {}).get("clips") or []:
+        if isinstance(c, dict) and c.get("index") is not None:
+            by_index[c["index"]] = {**by_index.get(c["index"], {}), **c}
+    state["clips"] = [by_index[k] for k in sorted(by_index)]
+    os.makedirs(os.path.join(OUTPUT_DIR, job_id), exist_ok=True)
+    with open(_project_state_path(job_id), "w") as f:
+        json.dump(state, f)
+    return {"ok": True, "clips": len(state["clips"])}
+
+
 # --- Per-job assets: media that timeline edits (recut segments of kind
 # image/clip) reference by bare file name. Lives under output/<job>/assets/.
 ASSET_MAX_BYTES = int(os.environ.get("ASSET_MAX_BYTES", str(200 * 1024 * 1024)))
@@ -2838,6 +2939,7 @@ async def reopen_local_project(job_id: str):
     if os.path.isdir(job_dir):
         os.utime(job_dir, None)  # restart the retention clock, like the cloud restore
     return {"job_id": job_id, "result": job.get("result"),
+            "project_state": _read_project_state(job_id),
             "source_available": bool(_locate_source(job_id))}
 
 
@@ -3519,23 +3621,51 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
 
     v_transcript = (recut.virtual_transcript(transcript, segments)
                     if req.reapply_captions else None)
+    # A recut is cut from the CLEAN file, so the burned hook and the chosen
+    # caption style would vanish. Put them back after the cut: hook first,
+    # captions on top, same order as the pipeline and /api/hook.
+    kept_hook = clip.get('auto_hook') if req.reapply_captions else None
+    kept_style = clip.get('caption_style')
+    finish_here = bool(kept_hook or kept_style)
 
     def run_recut():
         if fast:
-            return recut.perform_recut(
+            served, clean_recut = recut.perform_recut(
                 input_path=canonical_path,
                 segments=recut.rebase_segments(
                     segments, canonical_range['start'], canonical_range['end']),
                 output_dir=output_dir, clean_name=clean_name,
-                reframe=False, captions_transcript=v_transcript,
+                reframe=False,
+                captions_transcript=None if finish_here else v_transcript,
                 assets_dir=assets_dir)
-        return recut.perform_recut(
-            input_path=source_path, segments=segments,
-            output_dir=output_dir, clean_name=clean_name,
-            reframe=True, output_format=data.get('output_format', 'auto'),
-            watermark=bool(job.get('watermark')),
-            force_strategy=force_strategy,
-            captions_transcript=v_transcript)
+        else:
+            served, clean_recut = recut.perform_recut(
+                input_path=source_path, segments=segments,
+                output_dir=output_dir, clean_name=clean_name,
+                reframe=True, output_format=data.get('output_format', 'auto'),
+                watermark=bool(job.get('watermark')),
+                force_strategy=force_strategy,
+                captions_transcript=None if finish_here else v_transcript)
+        if not finish_here:
+            return served, clean_recut
+        current = os.path.join(output_dir, clean_recut)
+        if kept_hook and kept_hook.get('text'):
+            hooked = os.path.join(output_dir, f"hooked_{int(time.time())}_{clean_recut}")
+            size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
+            add_hook_to_video(current, kept_hook['text'], hooked,
+                              position=kept_hook.get('position', 'top'),
+                              font_scale=size_map.get(kept_hook.get('size'), 1.0),
+                              duration=kept_hook.get('duration_seconds'),
+                              style=kept_hook.get('style', 'classic'))
+            current = hooked
+        if v_transcript and v_transcript.get('segments'):
+            import main as _main
+            captioned = _main.auto_caption_clip(
+                current, v_transcript, 0.0, recut.total_duration(segments),
+                style_overrides=kept_style)
+            if captioned:
+                current = captioned
+        return os.path.basename(current), clean_recut
 
     try:
         loop = asyncio.get_event_loop()
@@ -4276,14 +4406,27 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         await _metering.commit_reservation(reservation_id)
 
     # 3. Update Result and Metadata
+    # The chosen style is remembered on the clip so later derivations (a
+    # recut, a hook) re-caption in THIS look rather than the pipeline default.
+    caption_style = {
+        "style": req.style, "alignment": req.position, "font_size": req.font_size,
+        "font_name": req.font_name, "font_color": req.font_color,
+        "border_color": req.border_color, "border_width": req.border_width,
+        "highlight_color": req.highlight_color if is_karaoke else req.font_color,
+        "effect": req.effect if is_karaoke else "none",
+        "base_opacity": req.base_opacity if is_karaoke else 1.0,
+        "uppercase": bool(req.uppercase) if is_karaoke else False,
+    }
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):
          job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+         job['result']['clips'][req.clip_index]['caption_style'] = caption_style
     
     # Update Metadata on Disk (Persistence)
     try:
         if req.clip_index < len(clips):
             clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+            clips[req.clip_index]['caption_style'] = caption_style
             # Update the main data structure
             data['shorts'] = clips
             
@@ -4478,7 +4621,7 @@ async def add_hook(req: HookRequest, request: Request):
     else:
         clip_data['auto_hook'] = {
             "text": req.text, "style": req.style, "position": req.position,
-            "duration_seconds": req.duration_seconds,
+            "duration_seconds": req.duration_seconds, "size": req.size,
         }
 
     # Update Persistence (Same logic as subtitles)

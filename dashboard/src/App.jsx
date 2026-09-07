@@ -336,7 +336,7 @@ function App() {
       server_file: v.serverVideoFile,
     }));
     s.pending = {};
-    apiFetch(`/api/projects/${s.jobId}/state`, {
+    apiFetch(billingEnabled ? `/api/projects/${s.jobId}/state` : `/api/local/projects/${s.jobId}/state`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clips }),
@@ -375,7 +375,7 @@ function App() {
   };
 
   const handleClipStateChange = (index, state) => {
-    if (!isManaged || !jobId) return;
+    if (!jobId) return;
     const s = clipStateSync.current;
     if (s.jobId !== jobId) { s.pending = {}; s.files = {}; s.jobId = jobId; }
     s.pending[index] = state;
@@ -386,7 +386,7 @@ function App() {
     if (file && files[index] !== file) {
       const isMount = files[index] === undefined;
       files[index] = file;
-      if (!isMount) chaseDurableFile(index, file);
+      if (!isMount && isManaged) chaseDurableFile(index, file);
     }
     if (s.timer) clearTimeout(s.timer);
     s.timer = setTimeout(flushClipState, 2000);
@@ -435,7 +435,7 @@ function App() {
   const reopenLocalProject = async (projectJobId) => {
     const data = await apiJson(`/api/local/projects/${projectJobId}/reopen`, { method: 'POST' });
     flushClipState();
-    setProjectState(null);
+    setProjectState(data.project_state || null);
     setNoSource(!data.source_available);
     setJobId(data.job_id);
     setResults(data.result || null);
