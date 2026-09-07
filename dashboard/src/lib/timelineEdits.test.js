@@ -96,3 +96,18 @@ test('totalDuration and sourceToRendered follow the timeline', () => {
   near(sourceToRendered(17.39, segs), 15.68 + 0.1 + (17.39 - 15.68) / 0.6);
   near(sourceToRendered(20, segs), 15.68 + 0.1 + 3.42 / 0.6 + 1.2 + 0.9);
 });
+
+test('renderedToSource inverts sourceToRendered and maps inserts to their anchor', async () => {
+  const { renderedToSource } = await import('./timelineEdits.js');
+  const segs = compileSegments(base, [
+    { id: 'p', type: 'pause', at: 15.68, ms: 100 },
+    { id: 's', type: 'slow', from: 15.68, to: 19.1, factor: 0.6 },
+    { id: 'i', type: 'insert', at: 19.1, kind: 'image', src: 'logo.png', ms: 1200 },
+  ]);
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-3, `${a} vs ${b}`);
+  near(renderedToSource(10, segs), 10);
+  near(renderedToSource(15.73, segs), 15.68);           // inside the hold
+  near(renderedToSource(sourceToRendered(17.39, segs), segs), 17.39);
+  near(renderedToSource(15.68 + 0.1 + 5.7 + 0.5, segs), 19.1); // inside the image
+  near(renderedToSource(sourceToRendered(20, segs), segs), 20);
+});

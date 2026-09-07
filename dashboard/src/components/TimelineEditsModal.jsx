@@ -4,7 +4,7 @@ import Modal from './ui/Modal';
 import { getApiUrl } from '../config';
 import { apiFetch, apiJson } from '../lib/api';
 import {
-    compileSegments, parseRecipe, sourceToRendered, totalDuration,
+    compileSegments, parseRecipe, sourceToRendered, renderedToSource, totalDuration,
 } from '../lib/timelineEdits';
 
 // "Super easy" timeline edits: pick a moment on the clip, then pause there,
@@ -45,7 +45,11 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     const [renderSeconds, setRenderSeconds] = useState(0);
     const [error, setError] = useState(null);
     const [previewUrl, setPreviewUrl] = useState(videoUrl);
+    // Live simulation of edits that are not rendered yet: {edit} while an
+    // overlay (pause badge / image / clip placeholder) is showing.
+    const [simOverlay, setSimOverlay] = useState(null);
     const videoRef = useRef(null);
+    const simRef = useRef({ lastSrc: null, fired: new Set(), timer: null, raf: null });
     const fileRef = useRef(null);
     const barRef = useRef(null);
 
@@ -103,6 +107,69 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     }, [words, playhead]);
     const dirty = useMemo(
         () => JSON.stringify(compiled) !== JSON.stringify(renderedSegments), [compiled, renderedSegments]);
+    // Edits the rendered file does not contain yet — these get simulated
+    // during playback (approximately) so you see them before applying.
+    const pendingEdits = useMemo(() => {
+        const rendered = parseRecipe(renderedSegments).edits;
+        const same = (a, b) => a.type === b.type
+            && Math.abs((a.type === 'slow' ? a.from : a.at) - (b.type === 'slow' ? b.from : b.at)) < 0.002
+            && (a.type !== 'slow' || (Math.abs(a.to - b.to) < 0.002 && a.factor === b.factor))
+            && (a.type !== 'pause' || a.ms === b.ms)
+            && (a.type !== 'insert' || (a.src === b.src && a.kind === b.kind));
+        return edits.filter((e) => !rendered.some((r) => same(e, r)));
+    }, [edits, renderedSegments]);
+
+    // ---- playback simulation ---------------------------------------------
+    useEffect(() => {
+        const v = videoRef.current;
+        if (!v) return undefined;
+        const sim = simRef.current;
+        const clearTimer = () => { if (sim.timer) { clearTimeout(sim.timer); sim.timer = null; } };
+        const tick = () => {
+            if (v.paused || v.ended) { sim.raf = null; return; }
+            const src = renderedToSource(v.currentTime, renderedSegments);
+            // slow ranges: change the playback rate while inside one
+            const slow = pendingEdits.find((e) => e.type === 'slow' && src >= e.from && src < e.to);
+            const rate = slow ? slow.factor : 1;
+            if (v.playbackRate !== rate) v.playbackRate = rate;
+            // pauses / inserts: fire once when the playhead crosses the anchor
+            const prev = sim.lastSrc;
+            sim.lastSrc = src;
+            if (prev !== null && src > prev) {
+                const hit = pendingEdits.find((e) => e.type !== 'slow' && e.at > prev && e.at <= src && !sim.fired.has(e.id));
+                if (hit) {
+                    sim.fired.add(hit.id);
+                    v.pause();
+                    setSimOverlay(hit);
+                    const ms = hit.type === 'pause' ? hit.ms : hit.kind === 'image' ? hit.ms : Math.round((hit.end - hit.start) * 1000);
+                    sim.timer = setTimeout(() => {
+                        setSimOverlay(null);
+                        sim.timer = null;
+                        v.play().catch(() => {});
+                    }, ms);
+                    sim.raf = null;
+                    return;
+                }
+            }
+            setPlayhead(src);
+            sim.raf = requestAnimationFrame(tick);
+        };
+        const onPlay = () => { if (!sim.raf) { sim.lastSrc = renderedToSource(v.currentTime, renderedSegments); sim.raf = requestAnimationFrame(tick); } };
+        const onSeeked = () => { sim.fired.clear(); sim.lastSrc = renderedToSource(v.currentTime, renderedSegments); };
+        const onEnded = () => { sim.fired.clear(); v.playbackRate = 1; };
+        v.addEventListener('play', onPlay);
+        v.addEventListener('seeked', onSeeked);
+        v.addEventListener('ended', onEnded);
+        return () => {
+            v.removeEventListener('play', onPlay);
+            v.removeEventListener('seeked', onSeeked);
+            v.removeEventListener('ended', onEnded);
+            if (sim.raf) cancelAnimationFrame(sim.raf);
+            sim.raf = null;
+            clearTimer();
+            v.playbackRate = 1;
+        };
+    }, [pendingEdits, renderedSegments, edl]);
 
     // ---- playhead / seeking ----------------------------------------------
     const seekTo = useCallback((t) => {
@@ -219,9 +286,21 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                 <div className="flex flex-col md:flex-row gap-6">
                     {/* Left: preview + timeline */}
                     <div className="flex-1 min-w-0 flex flex-col gap-3">
-                        <div className="bg-black rounded-card border border-rule overflow-hidden aspect-[9/16] max-h-[52vh] mx-auto w-full">
+                        <div className="relative bg-black rounded-card border border-rule overflow-hidden aspect-[9/16] max-h-[52vh] mx-auto w-full">
                             <video ref={videoRef} src={previewUrl} className="w-full h-full object-contain" controls playsInline />
+                            {simOverlay && simOverlay.type === 'insert' && simOverlay.kind === 'image' && (
+                                <img src={getApiUrl(`/videos/${jobId}/assets/${simOverlay.src}`)} alt="" className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none" />
+                            )}
+                            {simOverlay && simOverlay.type === 'insert' && simOverlay.kind === 'clip' && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/85 text-ink2 text-sm pointer-events-none">clip “{simOverlay.src}” {(simOverlay.end - simOverlay.start).toFixed(1)} s</div>
+                            )}
+                            {simOverlay && simOverlay.type === 'pause' && (
+                                <div className="absolute top-3 left-1/2 -translate-x-1/2 px-2 py-1 rounded-input bg-black/70 text-brass text-[11px] pointer-events-none flex items-center gap-1"><Pause size={12} />{simOverlay.ms} ms</div>
+                            )}
                         </div>
+                        {pendingEdits.length > 0 && (
+                            <p className="text-[11px] text-muted -mt-1">preview simulates {pendingEdits.length} unapplied edit{pendingEdits.length > 1 ? 's' : ''} during playback (approximate) — apply to render them for real.</p>
+                        )}
 
                         <div>
                             <div className="flex justify-between items-baseline mb-1">
