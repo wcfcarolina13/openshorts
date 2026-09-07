@@ -1972,6 +1972,7 @@ function App() {
                           jobId={jobId}
                           onEditClip={(index) => setEditingClip(index)}
                           onTimelineEdit={(index) => setTimelineClip(index)}
+                          onClipRerendered={handleClipRerendered}
                           onReframeClip={(index) => setReframingClip(index)}
                           initialState={projectState?.clips?.find((c) => c.index === i) || null}
                           onStateChange={handleClipStateChange}

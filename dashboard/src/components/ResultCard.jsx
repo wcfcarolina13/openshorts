@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, Clock, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, Clock, History, TrendingUp } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import SubtitleModal from './SubtitleModal';
+import VersionsModal from './VersionsModal';
 import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
@@ -36,10 +37,11 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+export default function ResultCard({ onTimelineEdit, onClipRerendered, clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+    const [showVersions, setShowVersions] = useState(false);
     const [showWatermarkModal, setShowWatermarkModal] = useState(false);
     const { plan } = useAuth();
     // The clip's real frame (1:1 and 16:9 outputs exist); previews and the
@@ -936,6 +938,15 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                     )}
 
                     <button
+                        onClick={() => setShowVersions(true)}
+                        className={QUIET_BTN}
+                        title="every rendered version of this clip; restore any of them"
+                    >
+                        <History size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
+                        history
+                    </button>
+
+                    <button
                         onClick={handleAutoEdit}
                         disabled={isEditing || autoEditNeedsKey}
                         title={autoEditNeedsKey ? 'needs a Gemini key: this feature watches the footage, which a local model cannot do' : 'AI-picked zooms and effects'}
@@ -1158,6 +1169,20 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                 </div>
             </Modal>
 
+            <VersionsModal
+                isOpen={showVersions}
+                onClose={() => setShowVersions(false)}
+                jobId={jobId}
+                clipIndex={index}
+                onRestored={(data) => {
+                    const name = data.new_video_url.split('/').pop();
+                    setServerVideoFile(name);
+                    setCurrentVideoUrl(`${getApiUrl(data.new_video_url)}?t=${Date.now()}`);
+                    setActiveLayers({ subtitles: null, hook: null, effects: null });
+                    if (videoRef.current) videoRef.current.load();
+                    onClipRerendered?.(index, data);
+                }}
+            />
             <SubtitleModal
                 isOpen={showSubtitleModal}
                 onClose={() => setShowSubtitleModal(false)}

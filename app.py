@@ -3378,6 +3378,121 @@ def _clip_recipe_parts(clip):
     return segments, canonical_range
 
 
+_VERSION_KINDS = (("subtitled_", "captions"), ("browser_", "browser render"),
+                  ("hooked_", "hook"), ("hook_", "hook"), ("recut_", "timeline"))
+
+
+def _clip_versions(output_dir, base_name, clip_index):
+    """Every rendered version of a clip still on disk, newest first."""
+    clean = f"{base_name}_clip_{clip_index + 1}.mp4"
+    names = {clean} if os.path.exists(os.path.join(output_dir, clean)) else set()
+    for pat in (f"subtitled_*_{clean}", f"recut_*_{clean}", f"hooked_*_{clean}",
+                f"hook_{clean}", f"browser_*_{clean}"):
+        names.update(os.path.basename(p) for p in glob.glob(os.path.join(output_dir, pat)))
+    versions = []
+    for name in names:
+        path = os.path.join(output_dir, name)
+        labels, rest = [], name
+        while rest != clean:
+            for prefix, label in _VERSION_KINDS:
+                if rest.startswith(prefix):
+                    if label not in labels:
+                        labels.append(label)
+                    rest = re.sub(r'^(subtitled|browser|hooked|recut)_\d+_([0-9a-f]{6}_)?|^hook_', '', rest, count=1)
+                    break
+            else:
+                break
+        recut_match = re.search(r'(recut_\d+_[0-9a-f]+_' + re.escape(clean) + r')$', name)
+        try:
+            mtime = os.path.getmtime(path)
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        versions.append({
+            "file": name, "modified": mtime, "bytes": size,
+            "kinds": labels or ["original"],
+            "recut": recut_match.group(1) if recut_match else None,
+        })
+    versions.sort(key=lambda v: v["modified"], reverse=True)
+    return versions
+
+
+@app.get("/api/clip/{job_id}/{clip_index}/versions")
+async def get_clip_versions(job_id: str, clip_index: int):
+    output_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Job not found")
+    with open(json_files[0]) as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if clip_index < 0 or clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    current = (clips[clip_index].get('video_url') or '').split('/')[-1]
+    versions = _clip_versions(output_dir, base_name, clip_index)
+    for v in versions:
+        v["current"] = v["file"] == current
+        v["video_url"] = f"/videos/{job_id}/{v['file']}"
+    return {"versions": versions, "current": current}
+
+
+class RevertRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    file: str
+
+
+@app.post("/api/clip/revert")
+async def revert_clip_version(req: RevertRequest):
+    """Make an earlier rendered version the clip's current one. Nothing is
+    deleted: the version you leave stays in the list, so this is undoable."""
+    output_dir = os.path.join(OUTPUT_DIR, os.path.basename(req.job_id))
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Job not found")
+    with open(json_files[0]) as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if req.clip_index < 0 or req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    versions = {v["file"]: v for v in _clip_versions(output_dir, base_name, req.clip_index)}
+    target = versions.get(os.path.basename(req.file))
+    if not target:
+        raise HTTPException(status_code=404, detail="That version is not on disk")
+    clip = clips[req.clip_index]
+    _, canonical_range = _clip_recipe_parts(clip)
+    updates = {}
+    if target["recut"]:
+        try:
+            with open(os.path.join(output_dir, target["recut"] + ".recipe.json")) as f:
+                side = json.load(f)
+            updates.update({"recipe": side.get("recipe"), "start": side.get("start"),
+                            "end": side.get("end"), "layout_ranges": side.get("layout_ranges")})
+        except (OSError, ValueError):
+            # Recut made before sidecars existed: the timeline cannot be
+            # recovered, but the video can still be shown and re-styled.
+            updates["recipe"] = None
+    else:
+        # A non-recut version is the canonical cut: reset the timeline to it.
+        updates.update({"recipe": {"v": 1, "segments": [dict(canonical_range)],
+                                   "canonical_range": dict(canonical_range)},
+                        "start": canonical_range["start"], "end": canonical_range["end"]})
+    url = _set_clip_video_url(req.job_id, req.clip_index, target["file"])
+    # _set_clip_video_url rewrote metadata; apply the recipe updates on top.
+    with open(json_files[0]) as f:
+        data = json.load(f)
+    data['shorts'][req.clip_index].update(updates)
+    with open(json_files[0], 'w') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    mem = ((jobs.get(req.job_id) or {}).get('result') or {}).get('clips') or []
+    if req.clip_index < len(mem):
+        mem[req.clip_index].update(updates)
+    return {"success": True, "new_video_url": url, "file": target["file"],
+            "recipe": updates.get("recipe"), "start": updates.get("start"), "end": updates.get("end")}
+
+
 @app.get("/api/clip/{job_id}/{clip_index}/edl")
 async def get_clip_edl(job_id: str, clip_index: int, request: Request):
     """The clip's editable recipe: which source segments it was cut from, the
@@ -3702,6 +3817,15 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
         mem_clips = (job.get('result') or {}).get('clips') or []
         if req.clip_index < len(mem_clips):
             mem_clips[req.clip_index].update(updates)
+
+        # Version history: a revert to this recut must bring its timeline
+        # back too, so the recipe travels with the file as a sidecar.
+        try:
+            with open(os.path.join(output_dir, _clean_recut_name + ".recipe.json"), 'w') as f:
+                json.dump({"recipe": new_recipe, "start": new_start, "end": new_end,
+                           "layout_ranges": updates['layout_ranges']}, f)
+        except OSError as e:
+            print(f"⚠️  Could not write recipe sidecar: {e}")
 
         _archive_clip_edit_bg(req.job_id, req.clip_index, served_name)
         if reservation_id:
