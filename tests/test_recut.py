@@ -529,3 +529,34 @@ class TestPerformRecutKinds:
             output_dir=str(tmp_path), clean_name="c.mp4", reframe=False,
             runner=runner, prober=lambda p: calls.append(p))
         assert calls == []
+
+
+class TestSampleRateAlignment:
+    """Parts are stream-copied together, so every generated part must carry
+    the cutting input's sample rate or the concat misreads it."""
+    MEDIA96 = {"width": 1080, "height": 1920, "fps": 30.0, "sample_rate": 96000, "has_audio": {}}
+
+    def test_silence_and_ar_follow_probed_rate(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        (tmp_path / "b.mp4").write_bytes(b"x")
+        segs = [{"kind": "hold", "at": 1, "ms": 100},
+                {"kind": "image", "src": "logo.png", "ms": 500},
+                {"kind": "clip", "src": "b.mp4", "start": 0, "end": 1},
+                {"start": 0, "end": 2, "speed": 0.5}]
+        cmds = recut.cut_commands("in.mp4", segs, ["p0", "p1", "p2", "p3"],
+                                  assets_dir=str(tmp_path), media=self.MEDIA96)
+        for cmd in cmds:
+            assert cmd[cmd.index("-ar") + 1] == "96000"
+        for cmd in cmds[:3]:
+            assert "anullsrc=r=96000:cl=stereo" in " ".join(cmd)
+
+    def test_plain_source_part_sets_no_rate(self):
+        cmd = recut.cut_commands("in.mp4", [_seg(0, 2)], ["p0"], media=self.MEDIA96)[0]
+        assert "-ar" not in cmd
+
+    def test_probe_media_defaults_include_sample_rate(self, monkeypatch):
+        class R:  # fake subprocess result
+            stdout = '{"streams": [{"codec_type": "video", "width": 720, "height": 1280, "r_frame_rate": "25/1"}, {"codec_type": "audio", "sample_rate": "44100"}]}'
+        monkeypatch.setattr(recut.subprocess, "run", lambda *a, **k: R())
+        info = recut.probe_media("x.mp4")
+        assert info == {"width": 720, "height": 1280, "fps": 25.0, "sample_rate": 44100, "has_audio": True}

@@ -330,7 +330,11 @@ def virtual_transcript(transcript, segments):
     }
 
 
-SILENCE_INPUT = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+DEFAULT_SAMPLE_RATE = 48000
+
+
+def _silence_input(rate):
+    return ["-f", "lavfi", "-i", f"anullsrc=r={int(rate)}:cl=stereo"]
 
 
 def _atempo_chain(speed):
@@ -377,7 +381,8 @@ def probe_media(path):
         ["ffprobe", "-v", "error", "-show_entries",
          "stream=codec_type,width,height,r_frame_rate", "-of", "json", path],
         capture_output=True, text=True, timeout=60).stdout
-    info = {"width": 1080, "height": 1920, "fps": 30.0, "has_audio": False}
+    info = {"width": 1080, "height": 1920, "fps": 30.0,
+            "sample_rate": DEFAULT_SAMPLE_RATE, "has_audio": False}
     for st in json.loads(out or "{}").get("streams", []):
         if st.get("codec_type") == "video" and st.get("width"):
             info["width"], info["height"] = int(st["width"]), int(st["height"])
@@ -388,6 +393,10 @@ def probe_media(path):
                 pass
         if st.get("codec_type") == "audio":
             info["has_audio"] = True
+            try:
+                info["sample_rate"] = int(st.get("sample_rate") or DEFAULT_SAMPLE_RATE)
+            except (TypeError, ValueError):
+                pass
     return info
 
 
@@ -400,6 +409,10 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
     files have audio; ``perform_recut`` probes it, tests inject it."""
     media = media or {"width": 1080, "height": 1920, "fps": 30.0, "has_audio": {}}
     width, height, fps = int(media["width"]), int(media["height"]), float(media["fps"])
+    # Parts are stream-copied together, so every generated part must carry
+    # the cutting input's sample rate (the pipeline's loudnorm output is 96 kHz).
+    rate = int(media.get("sample_rate") or DEFAULT_SAMPLE_RATE)
+    silence = _silence_input(rate)
     commands = []
     for seg, part in zip(segments, part_paths):
         kind = segment_kind(seg)
@@ -414,7 +427,7 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
             else:
                 af = ",".join(f for f in (_atempo_chain(speed), _loudnorm()) if f)
                 cmd += ["-vf", f"setpts=PTS/{speed:g}", *video_encode_args(QUALITY_FAST),
-                        "-af", af, *_audio_codec_args()]
+                        "-af", af, "-ar", str(rate), *_audio_codec_args()]
             commands.append(cmd + _tail(part))
 
         elif kind == "hold":
@@ -422,10 +435,10 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
             fc = (f"[0:v]trim=end_frame=1,setpts=PTS-STARTPTS,"
                   f"tpad=stop_mode=clone:stop_duration={seconds:g}[v]")
             commands.append([
-                "ffmpeg", "-y", "-ss", str(seg["at"]), "-i", input_path, *SILENCE_INPUT,
+                "ffmpeg", "-y", "-ss", str(seg["at"]), "-i", input_path, *silence,
                 "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
                 "-t", f"{seconds:g}", *video_encode_args(QUALITY_FAST),
-                *_audio_codec_args(), *_tail(part)])
+                "-ar", str(rate), *_audio_codec_args(), *_tail(part)])
 
         elif kind == "image":
             path = asset_path(assets_dir, seg["src"])
@@ -441,21 +454,22 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
                 fc = f"[0:v]{_fit_filter(width, height)}[v]"
                 inputs = ["-loop", "1", "-framerate", f"{fps:g}", "-t", f"{seconds:g}", "-i", path]
             commands.append([
-                "ffmpeg", "-y", *inputs, *SILENCE_INPUT,
+                "ffmpeg", "-y", *inputs, *silence,
                 "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
                 "-t", f"{seconds:g}", "-r", f"{fps:g}", *video_encode_args(QUALITY_FAST),
-                *_audio_codec_args(), *_tail(part)])
+                "-ar", str(rate), *_audio_codec_args(), *_tail(part)])
 
         else:  # clip
             path = asset_path(assets_dir, seg["src"])
             has_audio = bool((media.get("has_audio") or {}).get(path))
             cmd = ["ffmpeg", "-y", "-ss", str(seg["start"]), "-to", str(seg["end"]), "-i", path]
             if not has_audio:
-                cmd += SILENCE_INPUT
+                cmd += silence
             cmd += ["-filter_complex", f"[0:v]{_fit_filter(width, height)},fps={fps:g}[v]",
                     "-map", "[v]", "-map", "0:a" if has_audio else "1:a",
                     "-t", f"{float(seg['end']) - float(seg['start']):g}",
-                    *video_encode_args(QUALITY_FAST), *audio_encode_args(), *_tail(part)]
+                    *video_encode_args(QUALITY_FAST), "-ar", str(rate),
+                    *audio_encode_args(), *_tail(part)]
             commands.append(cmd)
     return commands
 
