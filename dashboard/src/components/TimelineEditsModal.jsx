@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Pause, Gauge, ImagePlus, Trash2, Loader2, AlertCircle, Layers, Maximize2, Smile, Clapperboard } from 'lucide-react';
+import { Pause, Gauge, ImagePlus, Trash2, Loader2, AlertCircle, Layers, Maximize2, Smile, Clapperboard, Move } from 'lucide-react';
 import Modal from './ui/Modal';
 import EmojiPicker from './EmojiPicker';
 import GifPicker from './GifPicker';
@@ -561,7 +561,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                             width: `${o.w * 100}%`,
                                             opacity: fx ? fx.opacity : 1,
                                         }}
-                                        className={`group absolute touch-none cursor-move ${draggingId === o.id ? 'outline outline-1 outline-brass' : 'hover:outline hover:outline-1 hover:outline-brass/60'}`}
+                                        className={`absolute touch-none cursor-move ${playing ? '' : 'outline-dashed outline-1 outline-offset-2'} ${draggingId === o.id ? 'outline-brass' : 'outline-brass/70'}`}
                                     >
                                         <div style={fx ? { transform: fx.transform } : undefined}>
                                             {VIDEO_EXT.test(o.src) ? (
@@ -581,14 +581,16 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                     className="w-full h-auto select-none pointer-events-none"
                                                 />
                                             )}
-                                            {/* Only on hover, and never during playback: a solid
-                                                square parked on the artwork reads as part of it. */}
+                                            {/* White core, brass rim: the handle shape people
+                                                already know, and not a colour anyone would have
+                                                baked into their own artwork. Gone during playback,
+                                                where you are watching rather than placing. */}
                                             {!playing && (
                                                 <span
                                                     onPointerDown={startDrag(o, 'resize')}
-                                                    className={`absolute right-0 bottom-0 w-3 h-3 rounded-sm bg-brass
-                                                        ring-1 ring-paper cursor-nwse-resize touch-none transition-opacity
-                                                        ${draggingId === o.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                                                    className="absolute -right-1.5 -bottom-1.5 w-3.5 h-3.5 rounded-sm
+                                                        bg-white border-2 border-brass shadow-sm
+                                                        cursor-nwse-resize touch-none"
                                                     title="drag to resize"
                                                 />
                                             )}
@@ -600,6 +602,13 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                 <div className="absolute top-3 left-1/2 -translate-x-1/2 px-2 py-1 rounded-input bg-black/70 text-brass text-[11px] pointer-events-none flex items-center gap-1"><Pause size={12} />{simOverlay.ms} ms</div>
                             )}
                         </div>
+                        {visibleOverlays.length > 0 && !playing && (
+                            <p className="text-[11px] text-muted -mt-1 flex items-center gap-1">
+                                <Move size={11} className="text-brass shrink-0" />
+                                the dashed box is “{visibleOverlays[0].src}” — drag it to move it,
+                                or the white corner square to resize. Both vanish while it plays.
+                            </p>
+                        )}
                         {pendingEdits.length > 0 && (
                             <p className="text-[11px] text-muted -mt-1">press play to see the {pendingEdits.length} unapplied edit{pendingEdits.length > 1 ? 's' : ''} — fades, slides and motion are simulated here and rendered for real on apply.</p>
                         )}
