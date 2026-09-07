@@ -491,3 +491,41 @@ class TestKindCommands:
         with pytest.raises(recut.RecutError):
             recut.cut_commands("in.mp4", [{"kind": "image", "src": "a.png", "ms": 500}],
                                ["p0.mp4"], media=MEDIA)
+
+
+class TestPerformRecutKinds:
+    def test_probes_input_and_clip_assets_when_kinds_present(self, tmp_path):
+        (tmp_path / "b.mp4").write_bytes(b"x")
+        seen, probed = [], []
+
+        def runner(cmd):
+            seen.append(cmd)
+            with open(cmd[-1], "wb") as f:
+                f.write(b"part")
+
+        def prober(path):
+            probed.append(path)
+            return {"width": 1080, "height": 1920, "fps": 25.0, "has_audio": False}
+
+        segs = [_seg(0, 2), {"kind": "clip", "src": "b.mp4", "start": 0, "end": 1}]
+        recut.perform_recut(
+            input_path=str(tmp_path / "canon.mp4"), segments=segs,
+            output_dir=str(tmp_path), clean_name="c.mp4", reframe=False,
+            assets_dir=str(tmp_path), runner=runner, prober=prober)
+        assert probed[0].endswith("canon.mp4") and probed[1].endswith("b.mp4")
+        clip_cmd = seen[1]
+        assert "fps=25" in clip_cmd[clip_cmd.index("-filter_complex") + 1]
+        assert "anullsrc" in " ".join(clip_cmd)
+
+    def test_plain_recipe_never_probes(self, tmp_path):
+        calls = []
+
+        def runner(cmd):
+            with open(cmd[-1], "wb") as f:
+                f.write(b"x")
+
+        recut.perform_recut(
+            input_path=str(tmp_path / "canon.mp4"), segments=[_seg(0, 2)],
+            output_dir=str(tmp_path), clean_name="c.mp4", reframe=False,
+            runner=runner, prober=lambda p: calls.append(p))
+        assert calls == []

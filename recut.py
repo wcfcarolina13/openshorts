@@ -470,11 +470,14 @@ def concat_command(list_path, out_path):
     ]
 
 
-def run_cut_concat(input_path, segments, out_path, workdir, runner=None):
-    """Cut every segment from ``input_path`` and join them into ``out_path``."""
+def run_cut_concat(input_path, segments, out_path, workdir, runner=None,
+                   assets_dir=None, media=None):
+    """Cut every segment from ``input_path`` and join them into ``out_path``.
+    ``assets_dir``/``media`` feed the insert kinds (see ``cut_commands``)."""
     run = runner or _run_ffmpeg
     if len(segments) == 1:
-        run(cut_commands(input_path, segments, [out_path])[0])
+        run(cut_commands(input_path, segments, [out_path],
+                         assets_dir=assets_dir, media=media)[0])
         return out_path
 
     # Unique per invocation: two concurrent recuts in the same job dir must
@@ -486,7 +489,8 @@ def run_cut_concat(input_path, segments, out_path, workdir, runner=None):
     ]
     list_path = os.path.join(workdir, f"temp_recut_concat_{token}.txt")
     try:
-        for command in cut_commands(input_path, segments, part_paths):
+        for command in cut_commands(input_path, segments, part_paths,
+                                    assets_dir=assets_dir, media=media):
             run(command)
         with open(list_path, "w") as f:
             for part in part_paths:
@@ -523,8 +527,15 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
                   reframe=False, output_format="auto", watermark=False,
                   captions_transcript=None, force_strategy=None,
                   crop_overrides=None, runner=None, renderer=None,
-                  watermarker=None, captioner=None):
+                  watermarker=None, captioner=None, assets_dir=None,
+                  prober=None):
     """Render a recut clip. Returns (served_filename, clean_filename).
+
+    - ``assets_dir``: the job's uploaded-media folder that image/clip segments
+      reference by bare file name.
+    - ``prober``: ``path -> {'width','height','fps','has_audio'}``; defaults to
+      ffprobe (``probe_media``) and is only called when the recipe has holds,
+      inserts or speed changes. Tests inject it.
 
     - ``input_path``/``segments``: the file to cut from and the times ON THAT
       FILE (the caller rebases for the fast path).
@@ -553,9 +564,25 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
     work_name = f"temp_{out_name}"
     work_path = os.path.join(output_dir, work_name)
 
+    media = None
+    if needs_fast_path(segments):
+        probe = prober or probe_media
+        media = dict(probe(input_path))
+        media["has_audio"] = {}
+        for seg in segments:
+            if segment_kind(seg) == "clip":
+                path = asset_path(assets_dir, seg["src"])
+                media["has_audio"][path] = bool(probe(path).get("has_audio"))
+
     try:
-        run_cut_concat(input_path, segments, work_path, output_dir,
-                       runner=runner)
+        if media is None:
+            # Plain recipe: keep the historical call shape (tests and callers
+            # that stub run_cut_concat with the old signature stay valid).
+            run_cut_concat(input_path, segments, work_path, output_dir,
+                           runner=runner)
+        else:
+            run_cut_concat(input_path, segments, work_path, output_dir,
+                           runner=runner, assets_dir=assets_dir, media=media)
 
         if reframe:
             if renderer is not None:
