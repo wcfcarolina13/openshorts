@@ -70,6 +70,12 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                 setBase(parsed.base);
                 setEdits(parsed.edits);
                 setRenderedSegments(data.segments || []);
+                // The server's current file is the truth: caption/hook restyles
+                // done on the card update the card, not App-level results, so
+                // the videoUrl prop can lag behind by several renders.
+                if (data.current_file) {
+                    setPreviewUrl(`${getApiUrl(`/videos/${jobId}/${data.current_file}`)}?t=${Date.now()}`);
+                }
                 setPlayhead(parsed.base[0]?.start ?? 0);
                 try {
                     const list = await apiJson(`/api/jobs/${jobId}/assets`);
