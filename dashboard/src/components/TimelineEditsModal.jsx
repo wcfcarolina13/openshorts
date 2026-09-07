@@ -9,7 +9,7 @@ import { getApiUrl } from '../config';
 import { apiFetch, apiJson } from '../lib/api';
 import {
     compileSegments, parseRecipe, sourceToRendered, renderedToSource, totalDuration,
-    SPEED_MIN, SPEED_MAX, MAX_TOTAL_SECONDS,
+    SPEED_MIN, SPEED_MAX, MAX_TOTAL_SECONDS, MIN_SEGMENT_SECONDS,
 } from '../lib/timelineEdits';
 
 // "Super easy" timeline edits: pick a moment on the clip, then pause there,
@@ -138,8 +138,14 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     const limits = edl?.limits || {};
     const holdRange = limits.hold_ms || [40, 3000];
     const imageRange = limits.image_ms || [200, 10000];
+    // A slow or an overlay is a RANGE (from/to); a pause or a fill insert is a
+    // point (at). Reading `at` off a range gave NaN, which sorted the list at
+    // random and drew its marker with an invalid `left` — so every inline
+    // insert appeared pinned to the very front of the timeline.
+    const editStart = (e) => (e.type === 'slow' || e.type === 'overlay' ? e.from : e.at);
+    const isRange = (e) => e.type === 'slow' || e.type === 'overlay';
     const sortedEdits = useMemo(() => edits.slice().sort(
-        (a, b) => (a.type === 'slow' ? a.from : a.at) - (b.type === 'slow' ? b.from : b.at)), [edits]);
+        (a, b) => editStart(a) - editStart(b)), [edits]);
     const wordAtPlayhead = useMemo(() => {
         const w = words.filter((x) => x.e <= playhead + 0.01).pop();
         return w ? w.w : null;
@@ -251,6 +257,11 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         seekTo(span.start + frac * (span.end - span.start));
     };
     const pct = (t) => `${((t - span.start) / (span.end - span.start || 1)) * 100}%`;
+    // Everything on screen is CLIP time. The recipe stores source seconds, but
+    // labelling the clip's first frame "0:04.6" reads as broken placement.
+    const clipT = (t) => Math.max(0, round3(t - span.start));
+    const fmtC = (t) => fmt(clipT(t));
+    const srcT = (t) => round3(span.start + Math.max(0, t));
     // An unapplied insert whose anchor is where the playhead stands: show it
     // right away, so "insert media" gives feedback without pressing play.
     const standingOn = useMemo(() => pendingEdits.find(
@@ -383,6 +394,42 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         (e) => e.type === 'overlay'
             && ((playhead >= e.from && playhead <= e.to) || e.id === draggingId)),
     [edits, playhead, draggingId]);
+
+    // Drag a range band on the source timeline: the body slides it, either edge
+    // trims it. Pixels map straight onto source seconds through the bar's width.
+    const startRangeDrag = (edit, mode) => (down) => {
+        down.preventDefault();
+        down.stopPropagation();
+        const rect = barRef.current?.getBoundingClientRect();
+        if (!rect || rect.width === 0) return;
+        const perPx = (span.end - span.start) / rect.width;
+        const startX = down.clientX;
+        const origin = { from: edit.from, to: edit.to };
+        const width = origin.to - origin.from;
+        setDraggingId(edit.id);
+        const move = (ev) => {
+            const dt = (ev.clientX - startX) * perPx;
+            let { from, to } = origin;
+            if (mode === 'move') {
+                from = Math.min(span.end - width, Math.max(span.start, origin.from + dt));
+                to = from + width;
+            } else if (mode === 'from') {
+                from = Math.min(origin.to - MIN_SEGMENT_SECONDS,
+                    Math.max(span.start, origin.from + dt));
+            } else {
+                to = Math.max(origin.from + MIN_SEGMENT_SECONDS,
+                    Math.min(span.end, origin.to + dt));
+            }
+            patchEdit(edit.id, { from: round3(from), to: round3(to) });
+        };
+        const up = () => {
+            setDraggingId(null);
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    };
 
     // Drag to move, or drag the corner handle to resize. Fractions of the
     // frame throughout, which is exactly what the recipe stores.
@@ -529,8 +576,8 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
 
                         <div>
                             <div className="flex justify-between items-baseline mb-1">
-                                <span className="eyebrow">Source timeline · click to place</span>
-                                <span className="readout">{fmt(span.start)} – {fmt(span.end)}</span>
+                                <span className="eyebrow">Timeline · click to place, drag a band to retime</span>
+                                <span className="readout">0:00.0 – {fmtC(span.end)}</span>
                             </div>
                             <div
                                 ref={barRef}
@@ -538,11 +585,26 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                 className="relative h-8 rounded-input bg-paper3 border border-rule cursor-crosshair select-none"
                                 title="click to move the playhead"
                             >
-                                {sortedEdits.map((e) => (e.type === 'slow' ? (
-                                    <div key={e.id} className="absolute top-0 bottom-0 bg-brass/25"
-                                        style={{ left: pct(e.from), width: `calc(${pct(e.to)} - ${pct(e.from)})` }} />
+                                {sortedEdits.map((e) => (isRange(e) ? (
+                                    <div
+                                        key={e.id}
+                                        onPointerDown={startRangeDrag(e, 'move')}
+                                        onClick={(ev) => ev.stopPropagation()}
+                                        title={`${e.type === 'slow' ? 'slow' : e.src} · drag to move, edges to trim`}
+                                        className={`absolute top-0 bottom-0 touch-none cursor-grab
+                                            ${e.type === 'slow' ? 'bg-brass/25' : 'bg-brass/40 border-y border-brass'}
+                                            ${draggingId === e.id ? 'ring-1 ring-brass' : ''}`}
+                                        style={{ left: pct(e.from), width: `calc(${pct(e.to)} - ${pct(e.from)})` }}
+                                    >
+                                        <span onPointerDown={startRangeDrag(e, 'from')}
+                                            className="absolute left-0 top-0 bottom-0 w-1.5 bg-brass cursor-ew-resize touch-none" />
+                                        <span onPointerDown={startRangeDrag(e, 'to')}
+                                            className="absolute right-0 top-0 bottom-0 w-1.5 bg-brass cursor-ew-resize touch-none" />
+                                    </div>
                                 ) : (
-                                    <div key={e.id} className={`absolute top-0 bottom-0 w-[3px] ${e.type === 'pause' ? 'bg-ink2' : 'bg-brass'}`}
+                                    <div key={e.id}
+                                        title={`${e.type === 'pause' ? 'pause' : e.src} · ${fmtC(e.at)}`}
+                                        className={`absolute top-0 bottom-0 w-[3px] ${e.type === 'pause' ? 'bg-ink2' : 'bg-brass'}`}
                                         style={{ left: pct(e.at) }} />
                                 )))}
                                 <div className="absolute -top-1 -bottom-1 w-[2px] bg-white" style={{ left: pct(playhead) }} />
@@ -571,7 +633,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                             {clipTitle && <p className="text-[12px] text-muted truncate mb-2" title={clipTitle}>{clipTitle}</p>}
                             <p className="eyebrow mb-1">At · scrub the player, click the bar, or click a word</p>
                             <p className="text-lg">
-                                {fmt(playhead)}
+                                {fmtC(playhead)}
                                 {wordAtPlayhead && <span className="text-muted text-sm"> · after “{wordAtPlayhead}”</span>}
                             </p>
                         </div>
@@ -680,10 +742,10 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                     <div key={e.id} className="rounded-input border border-rule p-2 text-[12px] flex flex-col gap-1.5">
                                         <div className="flex items-center justify-between gap-2">
                                             <span className="lowercase">
-                                                {e.type === 'pause' && <>pause at {fmt(e.at)}</>}
-                                                {e.type === 'slow' && <>slow {fmt(e.from)} → {fmt(e.to)}</>}
-                                                {e.type === 'insert' && <>{e.kind} “{e.src}” at {fmt(e.at)}</>}
-                                                {e.type === 'overlay' && <>inline “{e.src}” {fmt(e.from)} → {fmt(e.to)}</>}
+                                                {e.type === 'pause' && <>pause at {fmtC(e.at)}</>}
+                                                {e.type === 'slow' && <>slow {fmtC(e.from)} → {fmtC(e.to)}</>}
+                                                {e.type === 'insert' && <>{e.kind} “{e.src}” at {fmtC(e.at)}</>}
+                                                {e.type === 'overlay' && <>inline “{e.src}” {fmtC(e.from)} → {fmtC(e.to)}</>}
                                             </span>
                                             <button onClick={() => removeEdit(e.id)} className="text-muted hover:text-danger" title="remove"><Trash2 size={14} /></button>
                                         </div>
@@ -733,8 +795,13 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                             <div className="flex flex-col gap-1.5">
                                                 <div className="flex items-center gap-2 flex-wrap">
                                                     <span className="text-muted">until</span>
-                                                    <input type="number" step="0.1" min={e.from + 0.5} max={span.end} value={e.to}
-                                                        onChange={(ev) => patchEdit(e.id, { to: round3(Math.min(span.end, Math.max(e.from + 0.5, parseFloat(ev.target.value) || e.to))) })}
+                                                    <input type="number" step="0.1"
+                                                        min={clipT(e.from) + MIN_SEGMENT_SECONDS} max={clipT(span.end)}
+                                                        value={clipT(e.to)}
+                                                        onChange={(ev) => patchEdit(e.id, {
+                                                            to: Math.min(span.end, Math.max(e.from + MIN_SEGMENT_SECONDS,
+                                                                srcT(parseFloat(ev.target.value)) || e.to)),
+                                                        })}
                                                         className="input-field w-20 text-[12px] py-0.5" />
                                                     <span className="text-muted">s</span>
                                                     <button onClick={() => setEditMode(e, 'fill')} className={CHIP_BTN} title="give it the whole frame instead">fill</button>
@@ -747,9 +814,10 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                     <span className="readout w-10 text-right">{Math.round(e.w * 100)}%</span>
                                                 </label>
                                                 <p className="text-[11px] text-muted">
+                                                    drag its band on the timeline to retime it, or an edge to trim.{' '}
                                                     {playhead >= e.from && playhead <= e.to
-                                                        ? 'drag it on the preview; the corner handle resizes it.'
-                                                        : 'move the playhead into its range to drag it on the preview.'}
+                                                        ? 'drag it on the preview to place it; the corner handle resizes it.'
+                                                        : 'move the playhead into its range to place it on the preview.'}
                                                 </p>
                                             </div>
                                         )}
