@@ -1194,7 +1194,10 @@ function App() {
     /* h-dvh where supported: on mobile Safari/Chrome `100vh` is the tallest the
        viewport ever gets, so a h-screen shell hides its own bottom bar behind
        the browser chrome until the user scrolls. */
-    <div className="flex h-screen supports-[height:100dvh]:h-[100dvh] bg-paper overflow-hidden">
+    <div
+      className="notranslate flex h-screen supports-[height:100dvh]:h-[100dvh] bg-paper overflow-hidden"
+      translate="no"
+    >
       <Sidebar />
       {navOpen && <MobileNavDrawer />}
 

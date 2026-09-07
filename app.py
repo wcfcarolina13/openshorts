@@ -3434,7 +3434,48 @@ async def get_clip_versions(job_id: str, clip_index: int):
     for v in versions:
         v["current"] = v["file"] == current
         v["video_url"] = f"/videos/{job_id}/{v['file']}"
+        v["poster_url"] = f"/api/clip/{job_id}/{clip_index}/poster/{v['file']}"
     return {"versions": versions, "current": current}
+
+
+@app.get("/api/clip/{job_id}/{clip_index}/poster/{file}")
+async def get_clip_version_poster(job_id: str, clip_index: int, file: str):
+    """A still from one version, rendered once and cached beside it.
+
+    The version strip used to mount a <video> per row: tens of megabytes to
+    show ten thumbnails, black until the browser decided to decode a frame,
+    and a media element per row for every extension on the page to reach
+    into. A JPEG is a few kilobytes and is just a picture."""
+    output_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Job not found")
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    name = os.path.basename(file)
+    # Only a file this clip actually has a version for: the name arrives from
+    # the URL, so membership in the listing is the whole authorisation.
+    if name not in {v["file"] for v in _clip_versions(output_dir, base_name, clip_index)}:
+        raise HTTPException(status_code=404, detail="That version is not on disk")
+    video = os.path.join(output_dir, name)
+    poster = f"{video}.poster.jpg"
+
+    def _render():
+        if os.path.exists(poster) and os.path.getmtime(poster) >= os.path.getmtime(video):
+            return
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", "0.1", "-i", video,
+             "-frames:v", "1", "-vf", "scale=192:-2", "-q:v", "5", poster],
+            check=True, timeout=30,
+        )
+
+    try:
+        await asyncio.to_thread(_render)
+    except (subprocess.SubprocessError, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"Could not render a still: {e}")
+    if not os.path.exists(poster):
+        raise HTTPException(status_code=500, detail="Could not render a still")
+    return FileResponse(poster, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 class RevertRequest(BaseModel):

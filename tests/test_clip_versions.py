@@ -82,3 +82,39 @@ def test_revert_to_recut_restores_its_recipe(job):
 def test_revert_unknown_file_404(job):
     assert _request("POST", "/api/clip/revert", {"job_id": JOB, "clip_index": 0, "file": "../etc/passwd"}).status_code == 404
     assert _request("POST", "/api/clip/revert", {"job_id": JOB, "clip_index": 0, "file": "nope.mp4"}).status_code == 404
+
+
+def test_versions_carry_a_poster_url(job):
+    r = _request("GET", f"/api/clip/{JOB}/0/versions")
+    assert r.status_code == 200
+    for v in r.json()["versions"]:
+        assert v["poster_url"] == f"/api/clip/{JOB}/0/poster/{v['file']}"
+
+
+def test_poster_renders_once_and_is_served_from_cache(job, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        # The arguments are the contract: a single frame, scaled, to the
+        # cache path beside the video.
+        assert cmd[0] == "ffmpeg"
+        assert "-frames:v" in cmd and cmd[cmd.index("-frames:v") + 1] == "1"
+        open(cmd[-1], "wb").write(b"\xff\xd8jpeg")
+        return None
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    name = f"recut_400_abc123_t_clip_1.mp4"
+    first = _request("GET", f"/api/clip/{JOB}/0/poster/{name}")
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "image/jpeg"
+    assert (job / f"{name}.poster.jpg").exists()
+    second = _request("GET", f"/api/clip/{JOB}/0/poster/{name}")
+    assert second.status_code == 200
+    assert len(calls) == 1, "the second request must be served from the cached still"
+
+
+def test_poster_refuses_a_file_that_is_not_a_version(job):
+    for name in ("../../app.py", "t_metadata.json", "nope.mp4"):
+        r = _request("GET", f"/api/clip/{JOB}/0/poster/{name}")
+        assert r.status_code == 404, name

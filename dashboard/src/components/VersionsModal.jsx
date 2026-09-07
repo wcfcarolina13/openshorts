@@ -69,11 +69,11 @@ export default function VersionsModal({ isOpen, onClose, jobId, clipIndex, onRes
                     {versions.map((v) => (
                         <div key={v.file} className={`flex items-center gap-3 p-2 rounded-input border ${v.current ? 'border-brass bg-paper3' : 'border-rule'}`}>
                             <div className="w-12 h-16 bg-black rounded-input overflow-hidden shrink-0">
-                                <video src={`${getApiUrl(v.video_url)}#t=0.1`} className="w-full h-full object-cover" muted playsInline preload="metadata" />
+                                <img src={getApiUrl(v.poster_url || v.video_url)} alt="" loading="lazy" className="w-full h-full object-cover" />
                             </div>
                             <div className="min-w-0 flex-1">
                                 <p className="text-sm text-ink lowercase">
-                                    {(v.kinds || []).join(' + ') || 'render'}
+                                    <span>{(v.kinds || []).join(' + ') || 'render'}</span>
                                     {v.current && <span className="ml-2 readout text-brass">current</span>}
                                 </p>
                                 <p className="text-[11px] text-muted">{when(v.modified)} · {((v.bytes || 0) / 1e6).toFixed(1)} MB</p>
