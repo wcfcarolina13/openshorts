@@ -379,7 +379,7 @@ def probe_media(path):
     this; tests inject the dict so the command builders never touch a file."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries",
-         "stream=codec_type,width,height,r_frame_rate", "-of", "json", path],
+         "stream=codec_type,width,height,r_frame_rate,sample_rate", "-of", "json", path],
         capture_output=True, text=True, timeout=60).stdout
     info = {"width": 1080, "height": 1920, "fps": 30.0,
             "sample_rate": DEFAULT_SAMPLE_RATE, "has_audio": False}
@@ -426,14 +426,14 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
                 cmd += [*video_encode_args(QUALITY_FAST), *audio_encode_args()]
             else:
                 af = ",".join(f for f in (_atempo_chain(speed), _loudnorm()) if f)
-                cmd += ["-vf", f"setpts=PTS/{speed:g}", *video_encode_args(QUALITY_FAST),
+                cmd += ["-vf", f"setpts=PTS/{speed:g},fps={fps:g}", *video_encode_args(QUALITY_FAST),
                         "-af", af, "-ar", str(rate), *_audio_codec_args()]
             commands.append(cmd + _tail(part))
 
         elif kind == "hold":
             seconds = seg["ms"] / 1000.0
             fc = (f"[0:v]trim=end_frame=1,setpts=PTS-STARTPTS,"
-                  f"tpad=stop_mode=clone:stop_duration={seconds:g}[v]")
+                  f"tpad=stop_mode=clone:stop_duration={seconds:g},fps={fps:g}[v]")
             commands.append([
                 "ffmpeg", "-y", "-ss", str(seg["at"]), "-i", input_path, *silence,
                 "-filter_complex", fc, "-map", "[v]", "-map", "1:a",

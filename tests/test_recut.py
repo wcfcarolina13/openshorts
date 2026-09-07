@@ -446,7 +446,7 @@ class TestKindCommands:
     def test_speed_uses_setpts_and_atempo_chain(self):
         cmd = recut.cut_commands("in.mp4", [{"start": 1, "end": 3, "speed": 0.25}],
                                  ["p0.mp4"], media=MEDIA)[0]
-        assert cmd[cmd.index("-vf") + 1] == "setpts=PTS/0.25"
+        assert cmd[cmd.index("-vf") + 1] == "setpts=PTS/0.25,fps=30"
         af = cmd[cmd.index("-af") + 1]
         assert af.startswith("atempo=0.5,atempo=0.5")
         assert "-c:a" in cmd
@@ -554,9 +554,27 @@ class TestSampleRateAlignment:
         cmd = recut.cut_commands("in.mp4", [_seg(0, 2)], ["p0"], media=self.MEDIA96)[0]
         assert "-ar" not in cmd
 
-    def test_probe_media_defaults_include_sample_rate(self, monkeypatch):
+    def test_probe_media_asks_ffprobe_for_sample_rate(self, monkeypatch):
+        seen = {}
+
         class R:  # fake subprocess result
             stdout = '{"streams": [{"codec_type": "video", "width": 720, "height": 1280, "r_frame_rate": "25/1"}, {"codec_type": "audio", "sample_rate": "44100"}]}'
-        monkeypatch.setattr(recut.subprocess, "run", lambda *a, **k: R())
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return R()
+
+        monkeypatch.setattr(recut.subprocess, "run", fake_run)
         info = recut.probe_media("x.mp4")
         assert info == {"width": 720, "height": 1280, "fps": 25.0, "sample_rate": 44100, "has_audio": True}
+        # The fake output above would hide a probe that never asks for the
+        # field (it did once, and shipped 48 kHz parts into a 96 kHz clip).
+        entries = seen["cmd"][seen["cmd"].index("-show_entries") + 1]
+        assert "sample_rate" in entries and "r_frame_rate" in entries
+
+    def test_speed_and_hold_parts_pin_the_frame_rate(self):
+        media = dict(self.MEDIA96, fps=25.0)
+        speed = recut.cut_commands("in.mp4", [{"start": 0, "end": 2, "speed": 0.5}], ["p0"], media=media)[0]
+        assert speed[speed.index("-vf") + 1] == "setpts=PTS/0.5,fps=25"
+        hold = recut.cut_commands("in.mp4", [{"kind": "hold", "at": 1, "ms": 100}], ["p0"], media=media)[0]
+        assert hold[hold.index("-filter_complex") + 1].endswith(",fps=25[v]")
