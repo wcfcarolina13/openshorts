@@ -71,7 +71,12 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress, videoAspect: videoAspectProp }) {
+    // The preview must be composed at the clip's real shape. Composed at a
+    // fixed 9:16, a 1:1 clip sits letterboxed inside the frame and captions
+    // land in the black bar below it — a position the burn cannot reproduce.
+    const [videoAspect, setVideoAspect] = useState(videoAspectProp || 9 / 16);
+    useEffect(() => { if (videoAspectProp) setVideoAspect(videoAspectProp); }, [videoAspectProp]);
     const [position, setPosition] = useState('bottom');
     const [fontSize, setFontSize] = useState(AUTO_CAPTION_PRESET.fontSize);
     const [fontName, setFontName] = useState(AUTO_CAPTION_PRESET.fontName);
@@ -214,7 +219,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         <Modal isOpen={isOpen} onClose={onClose} size="xl" eyebrow="EDITOR · SUBTITLES" title="subtitles">
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                <div className="flex-1 min-w-0 flex items-start justify-center">
+                <div
+                    style={{ aspectRatio: String(videoAspect), width: `min(100%, calc(600px * ${videoAspect}))` }}
+                    className="flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative max-h-[600px]"
+                >
                     {captionsLoading ? (
                         <div className="flex items-center gap-2 text-muted">
                             <Loader2 size={16} className="animate-spin" />
@@ -224,12 +233,20 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                         <RemotionPreview
                             videoUrl={videoUrl}
                             durationInSeconds={durationSec}
+                            width={1080}
+                            height={Math.round(1080 / videoAspect)}
                             subtitles={subtitleConfig}
                             hook={existingHook || null}
                         />
                     ) : (
                         <>
-                            <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
+                            <video
+                                src={videoUrl}
+                                className="w-full h-full object-contain opacity-50"
+                                muted
+                                playsInline
+                                onLoadedMetadata={(e) => { const v = e.currentTarget; if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight); }}
+                            />
                             <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col items-center justify-center
                                 ${position === 'top' ? 'top-20' : ''}
                                 ${position === 'middle' ? 'top-0 bottom-0' : ''}
@@ -241,6 +258,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             </div>
                         </>
                     )}
+                </div>
                 </div>
 
                 {/* Right: Controls */}

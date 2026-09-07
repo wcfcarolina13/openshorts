@@ -1187,6 +1187,7 @@ export default function ResultCard({ onTimelineEdit, onClipRerendered, clip, ind
             />
             </ErrorBoundary>
             <SubtitleModal
+                videoAspect={videoDims.width / videoDims.height}
                 isOpen={showSubtitleModal}
                 onClose={() => setShowSubtitleModal(false)}
                 onGenerate={handleSubtitle}

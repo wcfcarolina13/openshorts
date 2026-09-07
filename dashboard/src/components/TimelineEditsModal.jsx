@@ -34,6 +34,7 @@ const CHIP_BTN_ON = 'px-2 py-0.5 rounded-input border border-brass bg-paper3 tex
 
 export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, clipTitle, videoUrl, onRerendered }) {
     const [edl, setEdl] = useState(null);
+    const [videoAspect, setVideoAspect] = useState(9 / 16);
     const [loadError, setLoadError] = useState(null);
     const [base, setBase] = useState([]);
     const [edits, setEdits] = useState([]);
@@ -315,8 +316,18 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                 <div className="flex flex-col md:flex-row gap-6">
                     {/* Left: preview + timeline */}
                     <div className="flex-1 min-w-0 flex flex-col gap-3">
-                        <div className="relative bg-black rounded-card border border-rule overflow-hidden aspect-[9/16] max-h-[52vh] mx-auto w-full">
-                            <video ref={videoRef} src={previewUrl} className="w-full h-full object-contain" controls playsInline />
+                        <div
+                            style={{ aspectRatio: String(videoAspect), width: `min(100%, calc(52vh * ${videoAspect}))` }}
+                            className="relative bg-black rounded-card border border-rule overflow-hidden max-h-[52vh] mx-auto"
+                        >
+                            <video
+                                ref={videoRef}
+                                src={previewUrl}
+                                className="w-full h-full object-contain"
+                                controls
+                                playsInline
+                                onLoadedMetadata={(e) => { const v = e.currentTarget; if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight); }}
+                            />
                             {overlay && overlay.type === 'insert' && overlay.kind === 'image' && (
                                 <img src={getApiUrl(`/videos/${jobId}/assets/${overlay.src}`)} alt="" className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none" />
                             )}

@@ -89,7 +89,11 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HOOK" title="viral hook">
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview */}
-                <div style={{ aspectRatio: String(videoAspect) }} className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative max-h-[600px]">
+                <div className="flex-1 min-w-0 flex items-start justify-center">
+                <div
+                    style={{ aspectRatio: String(videoAspect), width: `min(100%, calc(600px * ${videoAspect}))` }}
+                    className="flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative max-h-[600px]"
+                >
                     {useRemotionPreview ? (
                         <RemotionPreview
                             videoUrl={videoUrl}
@@ -127,6 +131,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                             </div>
                         </>
                     )}
+                </div>
                 </div>
 
                 {/* Right: Controls */}
