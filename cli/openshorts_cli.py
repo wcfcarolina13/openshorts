@@ -234,7 +234,8 @@ def cmd_recut(args):
     status, payload = _request("POST", "/api/clip/rerender", body)
     if status >= 400:
         _die(status, payload)
-    print(json.dumps(payload) if args.json else f"rerendered: {payload.get('video_url', payload)}")
+    url = payload.get("new_video_url") or payload.get("video_url") or payload
+    print(json.dumps(payload) if args.json else f"rerendered: {url}")
 
 
 def main(argv=None):

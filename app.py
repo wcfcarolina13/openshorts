@@ -3440,7 +3440,14 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
 
     # A framing override always re-reframes from the source: the canonical file
     # has the old layout baked into its pixels.
-    fast = (force_strategy is None
+    # Timeline edits (holds, inserts, speed) are fast-path only, and an
+    # inherited framing (req.framing is None) is already baked into the
+    # canonical file, so for THOSE recipes the inherited framing does not force
+    # the source path. Plain recuts keep the upstream rule: inherited framing
+    # re-reframes from the source.
+    edits_with_inherited_framing = (req.framing is None
+                                    and recut.needs_fast_path(segments))
+    fast = ((force_strategy is None or edits_with_inherited_framing)
             and os.path.exists(canonical_path)
             and recut.within_range(segments, canonical_range['start'],
                                    canonical_range['end']))
