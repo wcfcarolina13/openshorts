@@ -412,14 +412,17 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
         # 3. Calculate Overlay Position
         overlay_x = (video_width - box_w) // 2
         
+        # Tall (9:16) frames have headroom above the face, so 20 % from the
+        # top/bottom clears it. Square and landscape frames do not: the face
+        # sits near the middle, so the hook hugs the edge instead (5 % margin).
+        tall = video_height >= video_width * 1.4
+        edge_margin = int(video_height * 0.05)
         if position == "center":
             overlay_y = (video_height - box_h) // 2
         elif position == "bottom":
-             # Bottom 20% mark (approx)
-             overlay_y = int(video_height * 0.70)
+            overlay_y = int(video_height * 0.70) if tall else max(0, video_height - box_h - edge_margin)
         else:
-             # Top 20% mark
-             overlay_y = int(video_height * 0.20)
+            overlay_y = int(video_height * 0.20) if tall else edge_margin
         
         # 4. FFmpeg Command
         print(f"🎬 Overlaying hook: '{text}' at {overlay_x},{overlay_y}")

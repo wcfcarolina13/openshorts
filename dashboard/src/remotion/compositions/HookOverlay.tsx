@@ -22,10 +22,14 @@ const SIZE_SCALE: Record<string, number> = {
 
 // Percentages must match hooks.py's overlay_y math (top 20% / bottom 70%),
 // or the preview drifts from what the server path renders.
-const POSITION_STYLE: Record<string, React.CSSProperties> = {
-  top: { top: "20%", bottom: "auto" },
-  center: { top: "50%", bottom: "auto", transform: "translateY(-50%)" },
-  bottom: { top: "70%", bottom: "auto" },
+// Mirrors hooks.py: tall (9:16) frames have headroom, so 20 % / 70 % clear
+// the face; square and landscape frames do not, so the hook hugs the edge.
+const positionStyleFor = (position: string, tall: boolean): React.CSSProperties => {
+  switch (position) {
+    case "center": return { top: "50%", bottom: "auto", transform: "translateY(-50%)" };
+    case "bottom": return tall ? { top: "70%", bottom: "auto" } : { top: "auto", bottom: "5%" };
+    default: return { top: tall ? "20%" : "5%", bottom: "auto" };
+  }
 };
 
 // Must mirror hooks.py HOOK_STYLES (the server-side FFmpeg fallback).
@@ -116,7 +120,8 @@ const HookBox: React.FC<HookBoxProps> = ({ config, displayFrames }) => {
     });
   }
 
-  const positionStyle = POSITION_STYLE[config.position] ?? POSITION_STYLE.top;
+  const { width: frameWidth, height: frameHeight } = useVideoConfig();
+  const positionStyle = positionStyleFor(config.position, frameHeight >= frameWidth * 1.4);
   const look = HOOK_LOOKS[config.style ?? "classic"] ?? HOOK_LOOKS.classic;
 
   // Base font size: 5% of 1080 width (matches hooks.py logic)

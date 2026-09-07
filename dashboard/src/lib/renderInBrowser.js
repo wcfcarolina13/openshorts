@@ -23,6 +23,8 @@ export async function renderInBrowser({
     effects = null,
     onProgress,
     signal,
+    width = 1080,
+    height = 1920,
 }) {
     const fps = 30;
     const durationInFrames = Math.max(1, Math.round(durationInSeconds * fps));
@@ -32,8 +34,8 @@ export async function renderInBrowser({
             component: ShortVideo,
             durationInFrames,
             fps,
-            width: 1080,
-            height: 1920,
+            width,
+            height,
             id: 'ShortVideo',
             calculateMetadata: null,
         },
@@ -41,8 +43,8 @@ export async function renderInBrowser({
             videoUrl,
             durationInFrames,
             fps,
-            width: 1080,
-            height: 1920,
+            width,
+            height,
             subtitles,
             hook,
             effects,

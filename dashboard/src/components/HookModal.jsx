@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import RemotionPreview from './RemotionPreview';
 import Modal from './ui/Modal';
@@ -39,7 +39,7 @@ function loadHookPrefs() {
     try { return JSON.parse(localStorage.getItem('os_hook_prefs')) || {}; } catch { return {}; }
 }
 
-export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook }) {
+export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook, videoAspect: videoAspectProp }) {
     const prefs = loadHookPrefs();
     const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
     const [position, setPosition] = useState(prefs.position || 'top');
@@ -47,6 +47,9 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
     const [style, setStyle] = useState(prefs.style || 'classic');
     const [entranceAnimation, setEntranceAnimation] = useState(prefs.entranceAnimation || 'spring');
     const [displayDuration, setDisplayDuration] = useState(5);
+    const [videoAspect, setVideoAspect] = useState(videoAspectProp || 9 / 16);
+    useEffect(() => { if (videoAspectProp) setVideoAspect(videoAspectProp); }, [videoAspectProp]);
+    const tall = videoAspect <= 1 / 1.4;
 
     if (!isOpen) return null;
 
@@ -63,11 +66,14 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
     const useRemotionPreview = !!videoUrl;
 
     // Fallback preview logic (same as original)
+    // The preview box follows the clip's real aspect ratio (9:16, 1:1, 16:9),
+    // and the hook offset mirrors hooks.py: 20 % on tall frames, a 5 % edge
+    // margin on square/landscape ones where 20 % would land on the face.
     const getPositionClass = () => {
         switch (position) {
             case 'center': return 'items-center justify-center';
-            case 'bottom': return 'items-center justify-end pb-[20%]';
-            case 'top': default: return 'items-center justify-start pt-[20%]';
+            case 'bottom': return `items-center justify-end ${tall ? 'pb-[20%]' : 'pb-[5%]'}`;
+            case 'top': default: return `items-center justify-start ${tall ? 'pt-[20%]' : 'pt-[5%]'}`;
         }
     };
 
@@ -83,17 +89,25 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
         <Modal isOpen={isOpen} onClose={onClose} size="lg" eyebrow="EDITOR · HOOK" title="viral hook">
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                <div style={{ aspectRatio: String(videoAspect) }} className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative max-h-[600px]">
                     {useRemotionPreview ? (
                         <RemotionPreview
                             videoUrl={videoUrl}
                             durationInSeconds={durationInSeconds || 30}
+                            width={1080}
+                            height={Math.round(1080 / videoAspect)}
                             hook={hookConfig}
                             subtitles={existingSubtitles || null}
                         />
                     ) : (
                         <>
-                            <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
+                            <video
+                                src={videoUrl}
+                                className="w-full h-full object-contain opacity-50"
+                                muted
+                                playsInline
+                                onLoadedMetadata={(e) => { const v = e.currentTarget; if (v.videoWidth && v.videoHeight) setVideoAspect(v.videoWidth / v.videoHeight); }}
+                            />
                             <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col h-full ${getPositionClass()}`}>
                                 <div
                                     className="text-black font-bold px-3 py-2 rounded-xl shadow-2xl text-center whitespace-pre-wrap transition-all duration-200"
