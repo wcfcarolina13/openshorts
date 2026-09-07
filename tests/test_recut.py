@@ -432,3 +432,62 @@ class TestVirtualTranscriptKinds:
         w = vt["segments"][0]["words"][0]
         assert (w["word"].strip(), w["start"], w["end"]) == ("hello", 4.0, 5.0)
         assert vt["segments"][0]["end"] == 8.0
+
+
+MEDIA = {"width": 1080, "height": 1920, "fps": 30.0, "has_audio": {}}
+
+
+class TestKindCommands:
+    def test_plain_source_command_unchanged(self):
+        cmd = recut.cut_commands("in.mp4", [_seg(1, 3)], ["p0.mp4"], media=MEDIA)[0]
+        assert cmd[:8] == ["ffmpeg", "-y", "-ss", "1", "-to", "3", "-i", "in.mp4"]
+        assert "-vf" not in cmd and "-filter_complex" not in cmd
+
+    def test_speed_uses_setpts_and_atempo_chain(self):
+        cmd = recut.cut_commands("in.mp4", [{"start": 1, "end": 3, "speed": 0.25}],
+                                 ["p0.mp4"], media=MEDIA)[0]
+        assert cmd[cmd.index("-vf") + 1] == "setpts=PTS/0.25"
+        af = cmd[cmd.index("-af") + 1]
+        assert af.startswith("atempo=0.5,atempo=0.5")
+        assert "-c:a" in cmd
+
+    def test_hold_clones_one_frame_with_silence(self):
+        cmd = recut.cut_commands("in.mp4", [{"kind": "hold", "at": 2.5, "ms": 100}],
+                                 ["p0.mp4"], media=MEDIA)[0]
+        assert cmd[2:6] == ["-ss", "2.5", "-i", "in.mp4"]
+        assert "anullsrc=r=48000:cl=stereo" in " ".join(cmd)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "trim=end_frame=1" in fc and "tpad=stop_mode=clone:stop_duration=0.1" in fc
+        assert cmd[cmd.index("-t") + 1] == "0.1"
+
+    def test_image_is_scaled_padded_and_optionally_zoomed(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        plain = recut.cut_commands(
+            "in.mp4", [{"kind": "image", "src": "logo.png", "ms": 1200}],
+            ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
+        assert str(tmp_path / "logo.png") in plain
+        fc = plain[plain.index("-filter_complex") + 1]
+        assert "scale=1080:1920:force_original_aspect_ratio=decrease" in fc
+        assert "pad=1080:1920" in fc and "zoompan" not in fc
+        zoom = recut.cut_commands(
+            "in.mp4", [{"kind": "image", "src": "logo.png", "ms": 1200, "zoom": True}],
+            ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
+        assert "zoompan=" in zoom[zoom.index("-filter_complex") + 1]
+        assert "d=36" in zoom[zoom.index("-filter_complex") + 1]  # 1.2 s * 30 fps
+
+    def test_clip_maps_silence_when_asset_has_no_audio(self, tmp_path):
+        (tmp_path / "b.mp4").write_bytes(b"x")
+        seg = {"kind": "clip", "src": "b.mp4", "start": 1, "end": 2}
+        with_audio = dict(MEDIA, has_audio={str(tmp_path / "b.mp4"): True})
+        cmd = recut.cut_commands("in.mp4", [seg], ["p0.mp4"],
+                                 assets_dir=str(tmp_path), media=with_audio)[0]
+        assert "anullsrc" not in " ".join(cmd) and "0:a" in cmd
+        silent = dict(MEDIA, has_audio={str(tmp_path / "b.mp4"): False})
+        cmd = recut.cut_commands("in.mp4", [seg], ["p0.mp4"],
+                                 assets_dir=str(tmp_path), media=silent)[0]
+        assert "anullsrc" in " ".join(cmd) and "1:a" in cmd
+
+    def test_insert_without_assets_dir_raises(self):
+        with pytest.raises(recut.RecutError):
+            recut.cut_commands("in.mp4", [{"kind": "image", "src": "a.png", "ms": 500}],
+                               ["p0.mp4"], media=MEDIA)

@@ -24,8 +24,8 @@ import subprocess
 import time
 import uuid
 
-from ffmpeg_utils import (METADATA_SCRUB, QUALITY_FAST, audio_encode_args,
-                          video_encode_args)
+from ffmpeg_utils import (LOUDNORM_FILTER, METADATA_SCRUB, QUALITY_FAST,
+                          audio_encode_args, video_encode_args)
 
 # EDL limits. Deliberately generous — the editor is for humans fixing cuts,
 # not for stitching feature films.
@@ -330,26 +330,133 @@ def virtual_transcript(transcript, segments):
     }
 
 
-def cut_commands(input_path, segments, part_paths):
-    """ffmpeg argv for each segment cut. Re-encodes for frame-accurate cuts
-    with uniform parameters so the parts concat cleanly."""
+SILENCE_INPUT = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+
+
+def _atempo_chain(speed):
+    """atempo only accepts 0.5-2.0 per stage; chain stages for the rest."""
+    parts = []
+    remaining = float(speed)
+    while remaining < 0.5:
+        parts.append("atempo=0.5")
+        remaining /= 0.5
+    while remaining > 2.0:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
+    parts.append(f"atempo={remaining:g}")
+    return ",".join(parts)
+
+
+def _audio_codec_args():
+    """audio_encode_args() minus its -af pair (we fold loudnorm into our own
+    -af when a speed filter is present, and silence needs no normalising)."""
+    args = list(audio_encode_args())
+    if "-af" in args:
+        i = args.index("-af")
+        args = args[:i] + args[i + 2:]
+    return args
+
+
+def _loudnorm():
+    return LOUDNORM_FILTER if os.environ.get("AUDIO_NORMALIZE", "1").strip() != "0" else ""
+
+
+def _fit_filter(width, height):
+    return (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p")
+
+
+def _tail(part):
+    return [*METADATA_SCRUB, "-movflags", "+faststart", part]
+
+
+def probe_media(path):
+    """{'width','height','fps','has_audio'} via ffprobe. perform_recut calls
+    this; tests inject the dict so the command builders never touch a file."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "stream=codec_type,width,height,r_frame_rate", "-of", "json", path],
+        capture_output=True, text=True, timeout=60).stdout
+    info = {"width": 1080, "height": 1920, "fps": 30.0, "has_audio": False}
+    for st in json.loads(out or "{}").get("streams", []):
+        if st.get("codec_type") == "video" and st.get("width"):
+            info["width"], info["height"] = int(st["width"]), int(st["height"])
+            num, _, den = str(st.get("r_frame_rate", "30/1")).partition("/")
+            try:
+                info["fps"] = round(float(num) / float(den or 1), 3) or 30.0
+            except ValueError:
+                pass
+        if st.get("codec_type") == "audio":
+            info["has_audio"] = True
+    return info
+
+
+def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
+    """ffmpeg argv for each part. Every part is re-encoded with uniform
+    parameters so the parts concat cleanly, and every part carries an audio
+    track (silence for holds and stills) for the same reason.
+
+    ``media`` describes the cutting input (width/height/fps) and which asset
+    files have audio; ``perform_recut`` probes it, tests inject it."""
+    media = media or {"width": 1080, "height": 1920, "fps": 30.0, "has_audio": {}}
+    width, height, fps = int(media["width"]), int(media["height"]), float(media["fps"])
     commands = []
     for seg, part in zip(segments, part_paths):
-        commands.append([
-            "ffmpeg", "-y",
-            "-ss", str(seg["start"]),
-            "-to", str(seg["end"]),
-            "-i", input_path,
-            *video_encode_args(QUALITY_FAST),
-            *audio_encode_args(),
-            # Every final-artifact producer in the repo scrubs source metadata
-            # and fronts the moov atom (a fast-path recut IS the delivered
-            # file, and without +faststart the browser preview hangs). Also on
-            # intermediate parts: harmless, and it keeps the source's handler
-            # metadata from ever entering the chain.
-            *METADATA_SCRUB, "-movflags", "+faststart",
-            part,
-        ])
+        kind = segment_kind(seg)
+        if kind == "source":
+            speed = float(seg.get("speed", 1.0))
+            cmd = ["ffmpeg", "-y", "-ss", str(seg["start"]), "-to", str(seg["end"]),
+                   "-i", input_path]
+            if speed == 1.0:
+                # Unchanged from the pre-kinds builder: a plain recut is the
+                # delivered file, and this is the command every test pins.
+                cmd += [*video_encode_args(QUALITY_FAST), *audio_encode_args()]
+            else:
+                af = ",".join(f for f in (_atempo_chain(speed), _loudnorm()) if f)
+                cmd += ["-vf", f"setpts=PTS/{speed:g}", *video_encode_args(QUALITY_FAST),
+                        "-af", af, *_audio_codec_args()]
+            commands.append(cmd + _tail(part))
+
+        elif kind == "hold":
+            seconds = seg["ms"] / 1000.0
+            fc = (f"[0:v]trim=end_frame=1,setpts=PTS-STARTPTS,"
+                  f"tpad=stop_mode=clone:stop_duration={seconds:g}[v]")
+            commands.append([
+                "ffmpeg", "-y", "-ss", str(seg["at"]), "-i", input_path, *SILENCE_INPUT,
+                "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
+                "-t", f"{seconds:g}", *video_encode_args(QUALITY_FAST),
+                *_audio_codec_args(), *_tail(part)])
+
+        elif kind == "image":
+            path = asset_path(assets_dir, seg["src"])
+            seconds = seg["ms"] / 1000.0
+            frames = max(1, int(round(seconds * fps)))
+            if seg.get("zoom"):
+                fc = (f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                      f"crop={width}:{height},zoompan=z='1+0.15*on/{frames}':d={frames}:"
+                      f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps:g},"
+                      f"format=yuv420p[v]")
+                inputs = ["-i", path]
+            else:
+                fc = f"[0:v]{_fit_filter(width, height)}[v]"
+                inputs = ["-loop", "1", "-framerate", f"{fps:g}", "-t", f"{seconds:g}", "-i", path]
+            commands.append([
+                "ffmpeg", "-y", *inputs, *SILENCE_INPUT,
+                "-filter_complex", fc, "-map", "[v]", "-map", "1:a",
+                "-t", f"{seconds:g}", "-r", f"{fps:g}", *video_encode_args(QUALITY_FAST),
+                *_audio_codec_args(), *_tail(part)])
+
+        else:  # clip
+            path = asset_path(assets_dir, seg["src"])
+            has_audio = bool((media.get("has_audio") or {}).get(path))
+            cmd = ["ffmpeg", "-y", "-ss", str(seg["start"]), "-to", str(seg["end"]), "-i", path]
+            if not has_audio:
+                cmd += SILENCE_INPUT
+            cmd += ["-filter_complex", f"[0:v]{_fit_filter(width, height)},fps={fps:g}[v]",
+                    "-map", "[v]", "-map", "0:a" if has_audio else "1:a",
+                    "-t", f"{float(seg['end']) - float(seg['start']):g}",
+                    *video_encode_args(QUALITY_FAST), *audio_encode_args(), *_tail(part)]
+            commands.append(cmd)
     return commands
 
 
