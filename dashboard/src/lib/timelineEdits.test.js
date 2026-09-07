@@ -2,8 +2,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  compileSegments, parseRecipe, sourceToRendered, totalDuration, MIN_SEGMENT_SECONDS,
-  SPEED_MIN, SPEED_MAX,
+  compileSegments,
+  parseRecipe,
+  sourceToRendered,
+  totalDuration,
+  MIN_SEGMENT_SECONDS,
+  SPEED_MIN,
+  SPEED_MAX,
+  nearestEdge,
+  overlayPreviewStyle,
 } from './timelineEdits.js';
 
 const base = [{ start: 0, end: 20.957 }];
@@ -286,4 +293,59 @@ test('an edit round-trips through compile and parse with its effects intact', ()
   for (const k of ['from', 'to', 'src', 'x', 'y', 'w', 'in', 'out', 'motion']) {
     assert.equal(o[k], edit[k], `${k} survived the round trip`);
   }
+});
+
+test('nearestEdge measures in pixels, not fractions', () => {
+  // A 9:16 frame: x=0.9 is 0.1*0.5625 = 0.056 frame-heights from the right,
+  // while y=0.1 is 0.1 from the top. The right edge is genuinely nearer.
+  assert.equal(nearestEdge(0.9, 0.1, 9 / 16), 'right');
+  assert.equal(nearestEdge(0.5, 0.02, 9 / 16), 'top');
+  assert.equal(nearestEdge(0.02, 0.5, 9 / 16), 'left');
+  assert.equal(nearestEdge(0.5, 0.98, 9 / 16), 'bottom');
+});
+
+test('a fade preview ramps in and out and is solid in the middle', () => {
+  const e = { from: 2, to: 5, x: 0.1, y: 0.1, w: 0.2, in: 'fade', out: 'fade' };
+  assert.equal(overlayPreviewStyle(e, 0).opacity, 0);
+  assert.ok(Math.abs(overlayPreviewStyle(e, 0.175).opacity - 0.5) < 0.01);
+  assert.equal(overlayPreviewStyle(e, 1.5).opacity, 1);
+  assert.equal(overlayPreviewStyle(e, 3).opacity, 0);
+});
+
+test('a slide preview leaves the frame exactly and comes back to rest', () => {
+  const e = { from: 0, to: 3, x: 0.5, y: 0.02, w: 0.2, in: 'slide' };
+  const out = overlayPreviewStyle(e, 0, 9 / 16);        // fully out, off the top
+  assert.equal(out.top, 0);
+  assert.equal(out.transform, 'translate(0%, -100%)');
+  const seated = overlayPreviewStyle(e, 1, 9 / 16);
+  assert.equal(seated.top, 0.02);
+  assert.equal(seated.transform, 'translate(0%, 0%)');
+});
+
+test('a right-edge slide needs no box-sized nudge', () => {
+  const e = { from: 0, to: 3, x: 0.9, y: 0.5, w: 0.1, in: 'slide' };
+  const out = overlayPreviewStyle(e, 0, 9 / 16);
+  assert.ok(Math.abs(out.left - 1) < 1e-9);   // the box's LEFT edge is the frame's right
+  assert.equal(out.transform, 'translate(0%, 0%)');
+});
+
+test('motion moves the box without moving its anchor', () => {
+  const e = { from: 0, to: 3, x: 0.3, y: 0.4, w: 0.2, motion: 'bounce' };
+  const rest = overlayPreviewStyle(e, 0);
+  assert.equal(rest.transform, 'translate(0%, 0%)');
+  const up = overlayPreviewStyle(e, 1 / (4 * 1.4));     // |sin| = 1
+  assert.equal(up.left, 0.3);
+  assert.equal(up.top, 0.4);
+  assert.equal(up.transform, 'translate(0%, -12%)');
+});
+
+test('a plain overlay previews as a plain box', () => {
+  const e = { from: 0, to: 3, x: 0.3, y: 0.4, w: 0.2 };
+  assert.deepEqual(overlayPreviewStyle(e, 1.5),
+    { opacity: 1, left: 0.3, top: 0.4, transform: 'translate(0%, 0%)' });
+});
+
+test('a short overlay shortens its own transition, like the renderer', () => {
+  const e = { from: 0, to: 0.6, x: 0.1, y: 0.1, w: 0.2, in: 'fade' };
+  assert.equal(overlayPreviewStyle(e, 0.2).opacity, 1);   // span is 0.2, not 0.35
 });

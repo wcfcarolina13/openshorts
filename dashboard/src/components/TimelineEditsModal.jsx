@@ -10,7 +10,7 @@ import { apiFetch, apiJson } from '../lib/api';
 import {
     compileSegments, parseRecipe, sourceToRendered, renderedToSource, totalDuration,
     SPEED_MIN, SPEED_MAX, MAX_TOTAL_SECONDS, MIN_SEGMENT_SECONDS,
-    OVERLAY_TRANSITIONS, OVERLAY_MOTIONS,
+    OVERLAY_TRANSITIONS, OVERLAY_MOTIONS, overlayPreviewStyle,
 } from '../lib/timelineEdits';
 
 // "Super easy" timeline edits: pick a moment on the clip, then pause there,
@@ -76,6 +76,9 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     // Which media picker is open under the insert buttons: null | 'emoji' | 'gif'.
     const [picker, setPicker] = useState(null);
     const [draggingId, setDraggingId] = useState(null);
+    // Effects are simulated only while the preview is PLAYING: a paused frame
+    // sitting inside a fade-in would show an invisible box you cannot place.
+    const [playing, setPlaying] = useState(false);
     const [rendering, setRendering] = useState(false);
     const [renderSeconds, setRenderSeconds] = useState(0);
     const [error, setError] = useState(null);
@@ -224,9 +227,12 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
             // moves the source playhead too (the bar and word chips still work).
             if (v.paused) setPlayhead(round3(sim.lastSrc));
         };
-        const onEnded = () => { sim.fired.clear(); v.playbackRate = 1; };
+        const onEnded = () => { sim.fired.clear(); v.playbackRate = 1; setPlaying(false); };
+        const onPlayState = () => setPlaying(!v.paused && !v.ended);
         v.addEventListener('play', onPlay);
         v.addEventListener('playing', onPlay);
+        v.addEventListener('play', onPlayState);
+        v.addEventListener('pause', onPlayState);
         v.addEventListener('timeupdate', onTimeUpdate);
         v.addEventListener('seeked', onSeeked);
         v.addEventListener('ended', onEnded);
@@ -234,6 +240,8 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
         return () => {
             v.removeEventListener('play', onPlay);
             v.removeEventListener('playing', onPlay);
+            v.removeEventListener('play', onPlayState);
+            v.removeEventListener('pause', onPlayState);
             v.removeEventListener('timeupdate', onTimeUpdate);
             v.removeEventListener('seeked', onSeeked);
             v.removeEventListener('ended', onEnded);
@@ -535,47 +543,65 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                             {overlay && overlay.type === 'insert' && overlay.kind === 'clip' && (
                                 <div className="absolute inset-0 flex items-center justify-center bg-black/85 text-ink2 text-sm pointer-events-none">clip “{overlay.src}” {(overlay.end - overlay.start).toFixed(1)} s</div>
                             )}
-                            {visibleOverlays.map((o) => (
-                                <div
-                                    key={o.id}
-                                    onPointerDown={startDrag(o, 'move')}
-                                    style={{
-                                        left: `${o.x * 100}%`,
-                                        top: `${o.y * 100}%`,
-                                        width: `${o.w * 100}%`,
-                                    }}
-                                    className={`absolute touch-none cursor-move ${draggingId === o.id ? 'outline outline-1 outline-brass' : 'hover:outline hover:outline-1 hover:outline-brass/60'}`}
-                                >
-                                    {VIDEO_EXT.test(o.src) ? (
-                                        <video
-                                            src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
-                                            autoPlay
-                                            muted
-                                            loop
-                                            playsInline
-                                            className="w-full h-auto select-none pointer-events-none"
-                                        />
-                                    ) : (
-                                        <img
-                                            src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
-                                            alt=""
-                                            draggable={false}
-                                            className="w-full h-auto select-none pointer-events-none"
-                                        />
-                                    )}
-                                    <span
-                                        onPointerDown={startDrag(o, 'resize')}
-                                        className="absolute -right-1 -bottom-1 w-3 h-3 rounded-sm bg-brass cursor-nwse-resize touch-none"
-                                        title="drag to resize"
-                                    />
-                                </div>
-                            ))}
+                            {visibleOverlays.map((o) => {
+                                // While it plays, the box shows what the render
+                                // will do; paused, it sits at rest so it can be
+                                // placed. left/top are frame fractions and the
+                                // transform is in the box's own units — the two
+                                // units the renderer itself works in.
+                                const fx = playing
+                                    ? overlayPreviewStyle(o, playhead - o.from, videoAspect) : null;
+                                return (
+                                    <div
+                                        key={o.id}
+                                        onPointerDown={startDrag(o, 'move')}
+                                        style={{
+                                            left: `${(fx ? fx.left : o.x) * 100}%`,
+                                            top: `${(fx ? fx.top : o.y) * 100}%`,
+                                            width: `${o.w * 100}%`,
+                                            opacity: fx ? fx.opacity : 1,
+                                        }}
+                                        className={`group absolute touch-none cursor-move ${draggingId === o.id ? 'outline outline-1 outline-brass' : 'hover:outline hover:outline-1 hover:outline-brass/60'}`}
+                                    >
+                                        <div style={fx ? { transform: fx.transform } : undefined}>
+                                            {VIDEO_EXT.test(o.src) ? (
+                                                <video
+                                                    src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
+                                                    autoPlay
+                                                    muted
+                                                    loop
+                                                    playsInline
+                                                    className="w-full h-auto select-none pointer-events-none"
+                                                />
+                                            ) : (
+                                                <img
+                                                    src={getApiUrl(`/videos/${jobId}/assets/${o.src}`)}
+                                                    alt=""
+                                                    draggable={false}
+                                                    className="w-full h-auto select-none pointer-events-none"
+                                                />
+                                            )}
+                                            {/* Only on hover, and never during playback: a solid
+                                                square parked on the artwork reads as part of it. */}
+                                            {!playing && (
+                                                <span
+                                                    onPointerDown={startDrag(o, 'resize')}
+                                                    className={`absolute right-0 bottom-0 w-3 h-3 rounded-sm bg-brass
+                                                        ring-1 ring-paper cursor-nwse-resize touch-none transition-opacity
+                                                        ${draggingId === o.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                                                    title="drag to resize"
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
                             {simOverlay && simOverlay.type === 'pause' && (
                                 <div className="absolute top-3 left-1/2 -translate-x-1/2 px-2 py-1 rounded-input bg-black/70 text-brass text-[11px] pointer-events-none flex items-center gap-1"><Pause size={12} />{simOverlay.ms} ms</div>
                             )}
                         </div>
                         {pendingEdits.length > 0 && (
-                            <p className="text-[11px] text-muted -mt-1">preview simulates {pendingEdits.length} unapplied edit{pendingEdits.length > 1 ? 's' : ''} during playback (approximate) — apply to render them for real.</p>
+                            <p className="text-[11px] text-muted -mt-1">press play to see the {pendingEdits.length} unapplied edit{pendingEdits.length > 1 ? 's' : ''} — fades, slides and motion are simulated here and rendered for real on apply.</p>
                         )}
 
                         <div>

@@ -15,6 +15,60 @@ export const MAX_TOTAL_SECONDS = 180;
 // is left out of the recipe so a plain overlay stays the three numbers it was.
 export const OVERLAY_TRANSITIONS = ['cut', 'fade', 'slide'];
 export const OVERLAY_MOTIONS = ['none', 'bounce', 'float', 'shake'];
+export const OVERLAY_TRANSITION_SECONDS = 0.35;
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+/**
+ * Which frame edge an overlay at (x, y) is nearest, measured in PIXELS — a 9:16
+ * frame is far taller than it is wide, so comparing raw fractions would call
+ * everything "top". Mirrors recut._overlay_effects, ties included (left first).
+ */
+export function nearestEdge(x, y, aspect = 9 / 16) {
+  const d = { left: x * aspect, right: (1 - x) * aspect, top: y, bottom: 1 - y };
+  return Object.keys(d).reduce((a, b) => (d[b] < d[a] ? b : a));
+}
+
+/**
+ * How an overlay should look `t` seconds into its window, for the PREVIEW.
+ * Mirrors recut._overlay_effects so what plays here is what renders.
+ *
+ * `left`/`top` are frame fractions (the box's own position); `transform` is a
+ * translate in percentages of the BOX — the two units the renderer uses too
+ * (frame pixels for placement, overlay_w/overlay_h for motion), which is why
+ * a slide can leave the frame exactly without anyone measuring the box.
+ */
+export function overlayPreviewStyle(edit, t, aspect = 9 / 16) {
+  const d = Math.max(0.001, edit.to - edit.from);
+  const span = Math.min(OVERLAY_TRANSITION_SECONDS, Math.max(0.05, d / 3));
+
+  let opacity = 1;
+  if (edit.in === 'fade') opacity = Math.min(opacity, clamp01(t / span));
+  if (edit.out === 'fade') opacity = Math.min(opacity, clamp01((d - t) / span));
+
+  // p is how far OUT of place the box is: 1 = fully off-frame, 0 = seated.
+  let p = 0;
+  if (edit.in === 'slide') p = Math.max(p, clamp01(1 - t / span));
+  if (edit.out === 'slide') p = Math.max(p, clamp01((t - (d - span)) / span));
+
+  let left = edit.x;
+  let top = edit.y;
+  let boxX = 0;
+  let boxY = 0;
+  if (p > 0) {
+    const edge = nearestEdge(edit.x, edit.y, aspect);
+    if (edge === 'left') { left = edit.x * (1 - p); boxX = -p * 100; }
+    else if (edge === 'right') { left = edit.x + p * (1 - edit.x); }
+    else if (edge === 'top') { top = edit.y * (1 - p); boxY = -p * 100; }
+    else { top = edit.y + p * (1 - edit.y); }
+  }
+
+  if (edit.motion === 'bounce') boxY -= 12 * Math.abs(Math.sin(2 * Math.PI * 1.4 * t));
+  else if (edit.motion === 'float') boxY += 6 * Math.sin(2 * Math.PI * 0.5 * t);
+  else if (edit.motion === 'shake') boxX += 3 * Math.sin(2 * Math.PI * 9 * t);
+
+  return { opacity, left, top, transform: `translate(${boxX}%, ${boxY}%)` };
+}
 
 const round3 = (x) => Math.round(x * 1000) / 1000;
 const clampSpeed = (x) => Math.min(SPEED_MAX, Math.max(SPEED_MIN, round3(x)));
