@@ -287,17 +287,23 @@ def transcript_words(transcript):
 def virtual_transcript(transcript, segments):
     """Remap a source-absolute transcript onto the concatenated clip timeline.
 
-    Each EDL segment becomes one synthetic transcript segment whose words are
-    shifted so t=0 is the start of the recut clip. This is what lets
-    auto-captions and subtitle restyles work on multi-segment clips: they keep
-    slicing "words between clip_start and clip_end" exactly as before, against
-    this transcript with clip_start=0.
+    Each source segment becomes one synthetic transcript segment whose words
+    are shifted so t=0 is the start of the recut clip and scaled by 1/speed
+    when the segment is slowed or sped up. Holds and inserts carry no words;
+    they only advance the timeline. This is what lets auto-captions and
+    subtitle restyles work on edited clips: they keep slicing "words between
+    clip_start and clip_end" exactly as before, against this transcript with
+    clip_start=0.
     """
     out_segments = []
     offset = 0.0
     for seg in segments:
+        duration = segment_duration(seg)
+        if segment_kind(seg) != "source":
+            offset += duration
+            continue
         seg_start, seg_end = float(seg["start"]), float(seg["end"])
-        seg_duration = seg_end - seg_start
+        scale = 1.0 / float(seg.get("speed", 1.0))
         words = []
         for w in transcript_words(transcript):
             if w["e"] <= seg_start or w["s"] >= seg_end:
@@ -308,16 +314,16 @@ def virtual_transcript(transcript, segments):
                 # block collector treats every word as a continuation fragment
                 # and burns the whole line glued together.
                 "word": " " + w["w"],
-                "start": round(max(0.0, w["s"] - seg_start) + offset, 3),
-                "end": round(min(seg_duration, w["e"] - seg_start) + offset, 3),
+                "start": round(max(0.0, w["s"] - seg_start) * scale + offset, 3),
+                "end": round(min(seg_end - seg_start, w["e"] - seg_start) * scale + offset, 3),
             })
         out_segments.append({
             "start": round(offset, 3),
-            "end": round(offset + seg_duration, 3),
+            "end": round(offset + duration, 3),
             "text": "".join(w["word"] for w in words).strip(),
             "words": words,
         })
-        offset += seg_duration
+        offset += duration
     return {
         "language": (transcript or {}).get("language", "en"),
         "segments": out_segments,

@@ -414,3 +414,21 @@ class TestKindAwareRanges:
         out = recut.snap_segments(segs, TRANSCRIPT, 60)
         assert out[1] == {"kind": "hold", "at": 20.2, "ms": 100}
         assert out[0]["start"] <= 12.0 and out[0]["end"] >= 20.4
+
+
+class TestVirtualTranscriptKinds:
+    def test_hold_and_image_shift_later_words(self):
+        segs = [_seg(10, 15), {"kind": "hold", "at": 15, "ms": 500},
+                {"kind": "image", "src": "a.png", "ms": 1000}, _seg(19, 21)]
+        vt = recut.virtual_transcript(TRANSCRIPT, segs)
+        words = [w for s in vt["segments"] for w in s["words"]]
+        # "hello" 12.0 -> 2.0 ; "world" 20.0 -> (20-19) + 5 + 0.5 + 1.0 = 7.5
+        assert [(w["word"].strip(), w["start"]) for w in words] == [("hello", 2.0), ("world", 7.5)]
+        assert vt["segments"][-1]["start"] == 6.5 and vt["segments"][-1]["end"] == 8.5
+
+    def test_slow_segment_stretches_words(self):
+        segs = [{"start": 10, "end": 14, "speed": 0.5}]
+        vt = recut.virtual_transcript(TRANSCRIPT, segs)
+        w = vt["segments"][0]["words"][0]
+        assert (w["word"].strip(), w["start"], w["end"]) == ("hello", 4.0, 5.0)
+        assert vt["segments"][0]["end"] == 8.0

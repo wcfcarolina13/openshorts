@@ -131,3 +131,14 @@ class TestLayoutEnvNone:
         assert app_module.layout_env(["none"]) == {"AUTO_LAYOUT": "0"}
         assert app_module.layout_env(["auto"]) == {"AUTO_LAYOUT": "1"}
         assert app_module.layout_env(["split"])["SPLIT_LAYOUT"] == "1"
+
+
+def test_remap_advances_offset_over_holds_and_scales_speed():
+    import layout_ranges
+    ranges = [{"start": 0.0, "end": 30.0, "layout": "split"}]
+    segments = [{"start": 10, "end": 12, "speed": 0.5},
+                {"kind": "hold", "at": 12, "ms": 1000},
+                {"start": 12, "end": 14}]
+    out = layout_ranges.remap(ranges, segments)
+    assert out == [{"start": 0.0, "end": 4.0, "layout": "split"},
+                   {"start": 5.0, "end": 7.0, "layout": "split"}]

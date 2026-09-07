@@ -82,20 +82,28 @@ def remap(ranges, segments):
     overlaps and shifted to where that segment landed. This is what the fast
     rerender needs: it never reframes, so the only layout information it can
     have is the canonical clip's, seen through the new cut."""
+    # Lazy: recut imports this module lazily too, so neither side pays at import.
+    from recut import segment_duration, segment_kind
     out = []
     offset = 0.0
     for seg in segments or []:
         try:
-            seg_s, seg_e = float(seg["start"]), float(seg["end"])
+            duration = segment_duration(seg)
         except (KeyError, TypeError, ValueError):
             continue
+        if segment_kind(seg) != "source":
+            # Holds and inserts have no source layout; they only shift what follows.
+            offset += duration
+            continue
+        seg_s, seg_e = float(seg["start"]), float(seg["end"])
         if seg_e <= seg_s:
             continue
+        scale = 1.0 / float(seg.get("speed", 1.0))
         for r in normalise(ranges):
             s, e = max(r["start"], seg_s), min(r["end"], seg_e)
             if e > s:
-                out.append({"start": round(s - seg_s + offset, 3),
-                            "end": round(e - seg_s + offset, 3),
+                out.append({"start": round((s - seg_s) * scale + offset, 3),
+                            "end": round((e - seg_s) * scale + offset, 3),
                             "layout": r["layout"]})
-        offset += seg_e - seg_s
+        offset += duration
     return out
