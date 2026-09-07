@@ -42,6 +42,12 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const [showWatermarkModal, setShowWatermarkModal] = useState(false);
     const { plan } = useAuth();
+    // The clip's real frame (1:1 and 16:9 outputs exist); previews and the
+    // in-browser renderer must compose at this size, not a fixed 1080×1920.
+    const [videoDims, setVideoDims] = useState({ width: 1080, height: 1920 });
+    // Self-host: the effects step is Gemini-only (it looks at frames), so
+    // without a key the button is disabled with a reason instead of nagging.
+    const autoEditNeedsKey = !isManaged && !(geminiApiKey || localStorage.getItem('gemini_key'));
     const videoRef = React.useRef(null);
     // Pristine base clip (no burned subtitles/hook), stable regardless of how
     // clip.video_url mutates after server edits. Used as the compositing base
@@ -286,7 +292,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
             // Managed (paid) users get the Gemini key resolved server-side;
             // only BYOK/self-host needs a local key.
             if (!apiKey && !isManaged) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
+                throw new Error("auto edit watches the footage to pick effects, which only Gemini can do — a local model can't. Add a Gemini key in Settings to use it.");
             }
             const geminiHeaders = apiKey ? { 'X-Gemini-Key': apiKey } : {};
 
@@ -310,6 +316,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                     const newLayers = { ...activeLayers, effects: data.effects };
                     setActiveLayers(newLayers);
                     const blobUrl = await renderInBrowser({
+                    ...videoDims,
                         videoUrl: originalVideoUrl,
                         durationInSeconds: clipDuration,
                         subtitles: newLayers.subtitles,
@@ -386,6 +393,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                 setActiveLayers(remaining);
                 if (remaining.hook || remaining.effects) {
                     setCurrentVideoUrl(await renderInBrowser({
+                    ...videoDims,
                         videoUrl: serverUrl,
                         durationInSeconds: clipDuration,
                         subtitles: null,
@@ -418,6 +426,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                 const newLayers = { ...activeLayers, subtitles: options.remotion };
                 setActiveLayers(newLayers);
                 const blobUrl = await renderInBrowser({
+                    ...videoDims,
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
                     subtitles: newLayers.subtitles,
@@ -469,6 +478,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                 setActiveLayers(remaining);
                 if (remaining.hook || remaining.effects) {
                     const blobUrl = await renderInBrowser({
+                    ...videoDims,
                         videoUrl: serverUrl,
                         durationInSeconds: clipDuration,
                         subtitles: null,
@@ -499,6 +509,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                 const newLayers = { ...activeLayers, hook: hookData.remotion };
                 setActiveLayers(newLayers);
                 const blobUrl = await renderInBrowser({
+                    ...videoDims,
                     videoUrl: originalVideoUrl,
                     durationInSeconds: clipDuration,
                     subtitles: newLayers.subtitles,
@@ -742,6 +753,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
                     className="w-full h-full object-contain"
                     playsInline
                     onLoadedMetadata={(e) => {
+                        if (e.target.videoWidth) setVideoDims({ width: e.target.videoWidth, height: e.target.videoHeight });
                         if (e.target.videoWidth) setResolution(`${e.target.videoWidth}×${e.target.videoHeight}`);
                     }}
                     onError={() => {
@@ -905,7 +917,8 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
 
                     <button
                         onClick={handleAutoEdit}
-                        disabled={isEditing}
+                        disabled={isEditing || autoEditNeedsKey}
+                        title={autoEditNeedsKey ? 'needs a Gemini key: this feature watches the footage, which a local model cannot do' : 'AI-picked zooms and effects'}
                         className={QUIET_BTN}
                     >
                         {isEditing ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
@@ -1144,6 +1157,7 @@ export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable
             />
 
             <HookModal
+                videoAspect={videoDims.width / videoDims.height}
                 isOpen={showHookModal}
                 onClose={() => setShowHookModal(false)}
                 onGenerate={handleHook}

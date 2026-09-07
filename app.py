@@ -2797,6 +2797,50 @@ async def download_all_clips(job_id: str, request: Request):
 _restore_locks: Dict[str, asyncio.Lock] = {}
 
 
+# --- Self-host project list: finished jobs still on disk (jobs recovered
+# into memory at startup), so "new project" is not a one-way door. The cloud
+# library lives under /api/projects; these are deliberately separate paths.
+@app.get("/api/local/projects")
+async def list_local_projects():
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    projects = []
+    for job_id, job in list(jobs.items()):
+        if job.get("status") != "completed":
+            continue
+        clips = ((job.get("result") or {}).get("clips") or [])
+        if not clips:
+            continue
+        job_dir = os.path.join(OUTPUT_DIR, job_id)
+        try:
+            created = os.path.getmtime(job_dir)
+        except OSError:
+            created = 0
+        projects.append({
+            "job_id": job_id,
+            "title": clips[0].get("video_title_for_youtube_short") or job_id,
+            "clips": len(clips),
+            "created": created,
+            "video_url": clips[0].get("video_url"),
+        })
+    projects.sort(key=lambda p: p["created"], reverse=True)
+    return {"projects": projects}
+
+
+@app.post("/api/local/projects/{job_id}/reopen")
+async def reopen_local_project(job_id: str):
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    job = jobs.get(job_id)
+    if not job or job.get("status") != "completed":
+        raise HTTPException(status_code=404, detail="Project not found")
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    if os.path.isdir(job_dir):
+        os.utime(job_dir, None)  # restart the retention clock, like the cloud restore
+    return {"job_id": job_id, "result": job.get("result"),
+            "source_available": bool(_locate_source(job_id))}
+
+
 @app.post("/api/projects/{job_id}/restore")
 async def restore_project(job_id: str, request: Request):
     if not BILLING_ENABLED:

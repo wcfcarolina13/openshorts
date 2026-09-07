@@ -12,6 +12,7 @@ import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
 import TimelineEditsModal from './components/TimelineEditsModal';
+import RecentProjects from './components/RecentProjects';
 import { getApiUrl } from './config';
 import ReframeEditor from './components/ReframeEditor';
 import UsageMeter from './components/UsageMeter';
@@ -430,6 +431,21 @@ function App() {
 
   // Reopen an archived project from the History tab: the backend re-downloads
   // its files from R2 into the server's working dir and returns the full state.
+  // Self-host: reopen a finished job that is still on disk (see /api/local/projects).
+  const reopenLocalProject = async (projectJobId) => {
+    const data = await apiJson(`/api/local/projects/${projectJobId}/reopen`, { method: 'POST' });
+    flushClipState();
+    setProjectState(null);
+    setNoSource(!data.source_available);
+    setJobId(data.job_id);
+    setResults(data.result || null);
+    setLogs(['♻️ Project reopened.']);
+    setProcessingMedia(data.source_available ? { type: 'server', payload: `/api/source/${data.job_id}` } : null);
+    setQualityGate(null);
+    setStatus('complete');
+    setActiveTab('dashboard');
+  };
+
   const restoreProject = async (projectJobId) => {
     const data = await apiJson(`/api/projects/${projectJobId}/restore`, { method: 'POST' });
     flushClipState();
@@ -1734,6 +1750,9 @@ function App() {
                 </div>
 
                 <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                {!billingEnabled && status !== 'processing' && (
+                  <RecentProjects onReopen={reopenLocalProject} currentJobId={jobId} />
+                )}
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
