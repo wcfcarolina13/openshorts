@@ -2091,6 +2091,62 @@ async def put_upload(upload_id: str, request: Request):
             "hint": "Now call /api/process with upload_id."}
 
 
+# --- Per-job assets: media that timeline edits (recut segments of kind
+# image/clip) reference by bare file name. Lives under output/<job>/assets/.
+ASSET_MAX_BYTES = int(os.environ.get("ASSET_MAX_BYTES", str(200 * 1024 * 1024)))
+_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
+
+
+def _assets_dir(job_id: str) -> str:
+    return os.path.join(OUTPUT_DIR, job_id, "assets")
+
+
+def _require_job_dir(job_id: str) -> str:
+    job_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
+    if job_id not in jobs and not os.path.isdir(job_dir):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job_dir
+
+
+@app.put("/api/jobs/{job_id}/assets/{name}", status_code=201)
+async def put_job_asset(job_id: str, name: str, request: Request):
+    """Store one media file under the job's assets folder (raw request body)."""
+    _require_job_dir(job_id)
+    if (not _ASSET_NAME_RE.match(name)
+            or os.path.splitext(name)[1].lower() not in recut.ASSET_EXTENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail="name must be a plain file name with a png/jpg/jpeg/webp/gif/mp4/mov extension")
+    os.makedirs(_assets_dir(job_id), exist_ok=True)
+    path = os.path.join(_assets_dir(job_id), name)
+    size = 0
+    try:
+        with open(path + ".part", "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > ASSET_MAX_BYTES:
+                    raise HTTPException(status_code=413,
+                                        detail=f"asset exceeds {ASSET_MAX_BYTES} bytes")
+                f.write(chunk)
+    except HTTPException:
+        if os.path.exists(path + ".part"):
+            os.remove(path + ".part")
+        raise
+    os.replace(path + ".part", path)
+    return {"name": name, "bytes": size}
+
+
+@app.get("/api/jobs/{job_id}/assets")
+async def list_job_assets(job_id: str):
+    _require_job_dir(job_id)
+    folder = _assets_dir(job_id)
+    if not os.path.isdir(folder):
+        return {"assets": []}
+    names = sorted(n for n in os.listdir(folder) if not n.endswith(".part"))
+    return {"assets": [{"name": n, "bytes": os.path.getsize(os.path.join(folder, n))}
+                       for n in names]}
+
+
 @app.delete("/api/uploads/{upload_id}")
 async def delete_upload(upload_id: str, request: Request):
     """Drop a slot and its file before it expires (owner only in cloud mode)."""
