@@ -56,13 +56,11 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
         videoRef.current.loop = false;
         videoRef.current.muted = true; // Keep muted to avoid double audio with clip
       } else {
-        // Stop Sync: Pause. Once analysis is complete, resume the ambient loop.
+        // Stop Sync: Pause. Once analysis is complete the panel becomes a
+        // normal player (controls, no loop) instead of an endless muted
+        // ambient loop the user could not stop or unmute.
         videoRef.current.pause();
-
-        if (isComplete) {
-             videoRef.current.loop = true;
-             videoRef.current.play().catch(e => console.log("Ambient play prevented", e));
-        }
+        if (isComplete) videoRef.current.loop = false;
       }
     }
   }, [syncedTime, isSyncedPlaying, isYouTube, isComplete, syncTrigger]);
@@ -118,9 +116,10 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
             ref={videoRef}
             src={videoSrc}
             className="w-full h-full object-cover"
-            autoPlay
+            autoPlay={!isComplete}
             muted
-            loop
+            loop={!isComplete}
+            controls={isComplete}
             playsInline
           />
         ) : (
