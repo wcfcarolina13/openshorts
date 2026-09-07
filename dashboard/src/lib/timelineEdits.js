@@ -7,8 +7,13 @@
 // docs/superpowers/specs/2026-09-06-timeline-edits-design.md).
 
 export const MIN_SEGMENT_SECONDS = 0.5;
+// Mirrors recut.py: the renderer refuses anything outside these.
+export const SPEED_MIN = 0.25;
+export const SPEED_MAX = 4;
+export const MAX_TOTAL_SECONDS = 180;
 
 const round3 = (x) => Math.round(x * 1000) / 1000;
+const clampSpeed = (x) => Math.min(SPEED_MAX, Math.max(SPEED_MIN, round3(x)));
 
 const isSource = (seg) => !seg.kind || seg.kind === 'source';
 
@@ -66,9 +71,11 @@ function eventSegment(edit) {
  * baseSegments: the clip's source ranges ({start,end}, speed ignored).
  * edits: [{type:'pause', at, ms} | {type:'slow', from, to, factor} |
  *         {type:'insert', at, kind, src, ms?, zoom?, start?, end?}]
+ * globalSpeed: rate for the whole clip; a section slow multiplies with it,
+ *   and the product is clamped to what the renderer accepts.
  * Returns recipe segments in timeline order.
  */
-export function compileSegments(baseSegments, edits) {
+export function compileSegments(baseSegments, edits, globalSpeed = 1) {
   const out = [];
   for (const range of baseSegments) {
     const a = range.start;
@@ -98,7 +105,7 @@ export function compileSegments(baseSegments, edits) {
       if (i < points.length - 1) {
         const q = points[i + 1];
         const piece = { start: p, end: q };
-        const speed = speedAt((p + q) / 2);
+        const speed = clampSpeed(speedAt((p + q) / 2) * globalSpeed);
         if (speed !== 1) piece.speed = speed;
         items.push({ piece });
       }
@@ -124,8 +131,19 @@ export function compileSegments(baseSegments, edits) {
 let nextId = 1;
 const newId = () => `e${Date.now().toString(36)}${(nextId += 1)}`;
 
-/** Inverse of compileSegments, so reopening a clip shows its existing edits. */
+/**
+ * Inverse of compileSegments, so reopening a clip shows its existing edits.
+ *
+ * A speed shared by every source segment reads back as the clip's global
+ * speed. Mixed speeds cannot be split into "global x section" without
+ * guessing, so they all come back as section slows at global 1 — the same
+ * render either way, just a different way of describing it.
+ */
 export function parseRecipe(segments) {
+  const sourceSpeeds = segments.filter(isSource).map((s) => s.speed || 1);
+  const globalSpeed = sourceSpeeds.length
+    && sourceSpeeds.every((s) => Math.abs(s - sourceSpeeds[0]) < 1e-6)
+    ? sourceSpeeds[0] : 1;
   const base = [];
   const edits = [];
   let lastSourceEnd = null;
@@ -140,7 +158,7 @@ export function parseRecipe(segments) {
       const last = base[base.length - 1];
       if (last && last.end === seg.start) last.end = seg.end;
       else base.push({ start: seg.start, end: seg.end });
-      if (seg.speed && seg.speed !== 1) {
+      if (seg.speed && seg.speed !== 1 && globalSpeed === 1) {
         const prevSlow = edits[edits.length - 1];
         if (prevSlow && prevSlow.type === 'slow' && prevSlow.to === seg.start
             && prevSlow.factor === seg.speed) prevSlow.to = seg.end;
@@ -158,5 +176,5 @@ export function parseRecipe(segments) {
     }
   }
   if (pendingInserts.length) flushInserts(lastSourceEnd ?? 0);
-  return { base, edits };
+  return { base, edits, globalSpeed };
 }

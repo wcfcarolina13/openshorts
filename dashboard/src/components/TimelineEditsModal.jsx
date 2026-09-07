@@ -5,6 +5,7 @@ import { getApiUrl } from '../config';
 import { apiFetch, apiJson } from '../lib/api';
 import {
     compileSegments, parseRecipe, sourceToRendered, renderedToSource, totalDuration,
+    SPEED_MIN, SPEED_MAX, MAX_TOTAL_SECONDS,
 } from '../lib/timelineEdits';
 
 // "Super easy" timeline edits: pick a moment on the clip, then pause there,
@@ -14,6 +15,10 @@ import {
 // the same endpoint the trim editor uses, so the two never fight.
 
 const SPEED_CHOICES = [0.5, 0.75, 1.5, 2];
+// Whole-clip presets. The slider between them is the granular control; these
+// are just the rates people ask for by name.
+const CLIP_SPEED_CHOICES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const SPEED_STEP = 0.05;
 const ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.mp4,.mov';
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
 
@@ -35,6 +40,8 @@ const CHIP_BTN_ON = 'px-2 py-0.5 rounded-input border border-brass bg-paper3 tex
 export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, clipTitle, videoUrl, onRerendered }) {
     const [edl, setEdl] = useState(null);
     const [videoAspect, setVideoAspect] = useState(9 / 16);
+    // One rate for the whole clip. A section slow multiplies with it.
+    const [globalSpeed, setGlobalSpeed] = useState(1);
     const [loadError, setLoadError] = useState(null);
     const [base, setBase] = useState([]);
     const [edits, setEdits] = useState([]);
@@ -70,6 +77,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                 setEdl(data);
                 setBase(parsed.base);
                 setEdits(parsed.edits);
+                setGlobalSpeed(parsed.globalSpeed);
                 setRenderedSegments(data.segments || []);
                 // The server's current file is the truth: caption/hook restyles
                 // done on the card update the card, not App-level results, so
@@ -103,7 +111,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     }), [base]);
     const words = useMemo(() => (edl?.words || []).filter(
         (w) => base.some((b) => w.e > b.start && w.s < b.end)), [edl, base]);
-    const compiled = useMemo(() => compileSegments(base, edits), [base, edits]);
+    const compiled = useMemo(() => compileSegments(base, edits, globalSpeed), [base, edits, globalSpeed]);
     const limits = edl?.limits || {};
     const holdRange = limits.hold_ms || [40, 3000];
     const imageRange = limits.image_ms || [200, 10000];
@@ -126,6 +134,8 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
             && (a.type !== 'insert' || (a.src === b.src && a.kind === b.kind));
         return edits.filter((e) => !rendered.some((r) => same(e, r)));
     }, [edits, renderedSegments]);
+    const renderedGlobalSpeed = useMemo(
+        () => parseRecipe(renderedSegments).globalSpeed, [renderedSegments]);
 
     // ---- playback simulation ---------------------------------------------
     useEffect(() => {
@@ -139,7 +149,11 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
             const src = renderedToSource(v.currentTime, renderedSegments);
             // slow ranges: change the playback rate while inside one
             const slow = pendingEdits.find((e) => e.type === 'slow' && src >= e.from && src < e.to);
-            const rate = slow ? slow.factor : 1;
+            // The rendered file may already carry the global speed; only the
+            // part that is not rendered yet needs simulating.
+            const pendingGlobal = globalSpeed / (renderedGlobalSpeed || 1);
+            const rate = Math.min(SPEED_MAX, Math.max(SPEED_MIN,
+                (slow ? slow.factor : 1) * pendingGlobal));
             if (v.playbackRate !== rate) v.playbackRate = rate;
             // pauses / inserts: fire once when the playhead crosses the anchor
             const prev = sim.lastSrc;
@@ -194,7 +208,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
             clearTimer();
             v.playbackRate = 1;
         };
-    }, [pendingEdits, renderedSegments, edl]);
+    }, [pendingEdits, renderedSegments, edl, globalSpeed, renderedGlobalSpeed]);
 
     // ---- playhead / seeking ----------------------------------------------
     const seekTo = useCallback((t) => {
@@ -305,6 +319,7 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
     if (!isOpen) return null;
 
     const added = round3(totalDuration(compiled) - totalDuration(base));
+    const tooLong = totalDuration(compiled) > MAX_TOTAL_SECONDS;
 
     return (
         <Modal isOpen={isOpen} onClose={onClose} size="xl" eyebrow="EDITOR · TIMELINE" title="timeline edits">
@@ -391,6 +406,41 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                             </p>
                         </div>
 
+                        <div className="rounded-input border border-rule p-3">
+                            <div className="flex items-baseline justify-between mb-2">
+                                <p className="eyebrow">Whole clip speed</p>
+                                <span className="readout text-brass">{globalSpeed.toFixed(2)}×</span>
+                            </div>
+                            <input
+                                type="range"
+                                className="w-full accent-brass"
+                                min={SPEED_MIN}
+                                max={SPEED_MAX}
+                                step={SPEED_STEP}
+                                value={globalSpeed}
+                                disabled={rendering}
+                                aria-label="whole clip speed"
+                                onChange={(ev) => setGlobalSpeed(round3(Number(ev.target.value)))}
+                            />
+                            <div className="flex flex-wrap gap-1 mt-2">
+                                {CLIP_SPEED_CHOICES.map((f) => (
+                                    <button
+                                        key={f}
+                                        onClick={() => setGlobalSpeed(f)}
+                                        disabled={rendering}
+                                        className={Math.abs(globalSpeed - f) < 1e-6 ? CHIP_BTN_ON : CHIP_BTN}
+                                    >
+                                        {f === 1 ? 'normal' : `${f}×`}
+                                    </button>
+                                ))}
+                            </div>
+                            <p className="text-[11px] text-muted mt-2">
+                                {globalSpeed === 1
+                                    ? 'the clip plays at its recorded speed.'
+                                    : `the whole clip runs at ${globalSpeed.toFixed(2)}× — ${fmt(totalDuration(compiled))} instead of ${fmt(totalDuration(base))}. Voices keep their pitch.`}
+                            </p>
+                        </div>
+
                         <div className="flex flex-col gap-2">
                             <button className={BIG_BTN} onClick={addPause} disabled={rendering}>
                                 <Pause size={18} className="text-brass shrink-0" />
@@ -442,6 +492,17 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                     onChange={(ev) => patchEdit(e.id, { to: round3(Math.min(span.end, Math.max(e.from + 0.5, parseFloat(ev.target.value) || e.to))) })}
                                                     className="input-field w-20 text-[12px] py-0.5" />
                                                 <span className="text-muted">s ·</span>
+                                                <input
+                                                    type="range"
+                                                    className="w-20 accent-brass"
+                                                    min={SPEED_MIN}
+                                                    max={SPEED_MAX}
+                                                    step={SPEED_STEP}
+                                                    value={e.factor}
+                                                    aria-label="section speed"
+                                                    onChange={(ev) => patchEdit(e.id, { factor: round3(Number(ev.target.value)) })}
+                                                />
+                                                <span className="readout">{e.factor.toFixed(2)}×</span>
                                                 {SPEED_CHOICES.map((f) => (
                                                     <button key={f} onClick={() => patchEdit(e.id, { factor: f })}
                                                         className={e.factor === f ? CHIP_BTN_ON : CHIP_BTN}>{f}×</button>
@@ -480,10 +541,16 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                 <span>{totalDuration(compiled).toFixed(1)} s total</span>
                                 <span>{added >= 0 ? '+' : ''}{added.toFixed(1)} s</span>
                             </div>
+                            {tooLong && (
+                                <div className="flex items-start gap-2 text-danger text-[12px]">
+                                    <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                                    {totalDuration(compiled).toFixed(1)} s is past the {MAX_TOTAL_SECONDS} s the renderer accepts — raise the speed or trim the clip.
+                                </div>
+                            )}
                             {error && <div className="flex items-start gap-2 text-danger text-[12px]"><AlertCircle size={14} className="shrink-0 mt-0.5" />{error}</div>}
                             <div className="flex gap-2">
                                 <button onClick={onClose} className="btn-ghost">{dirty ? 'cancel' : 'close'}</button>
-                                <button onClick={apply} disabled={rendering || !dirty || compiled.length === 0} className="btn-primary flex-1">
+                                <button onClick={apply} disabled={rendering || !dirty || tooLong || compiled.length === 0} className="btn-primary flex-1">
                                     {rendering ? <span className="flex items-center justify-center gap-2"><Loader2 size={16} className="animate-spin" />rendering… {renderSeconds}s</span> : 'apply edits'}
                                 </button>
                             </div>

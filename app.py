@@ -1080,6 +1080,13 @@ async def cleanup_jobs():
                         shutil.rmtree(job_path, ignore_errors=True)
                         if job_id in jobs:
                             del jobs[job_id]
+                    else:
+                        # Version history is a full MP4 per render; without
+                        # this a long editing session outgrows the retention
+                        # window on its own.
+                        dropped = _prune_job_versions(job_path)
+                        if dropped:
+                            print(f"🧹 Pruned {len(dropped)} old clip versions in {job_id}")
 
             for job_id in _sweep_retained_sources(now):
                 print(f"🧹 Dropped retained source for job {job_id}")
@@ -3417,6 +3424,61 @@ def _clip_versions(output_dir, base_name, clip_index):
     return versions
 
 
+VERSION_HISTORY_KEEP = max(1, int(os.environ.get("VERSION_HISTORY_KEEP", "8")))
+
+
+def _prune_clip_versions(output_dir, base_name, clip_index, current, keep=None):
+    """Drop the oldest rendered versions of a clip so history stays bounded.
+
+    Every render leaves a whole MP4 behind, so an afternoon of edits is
+    hundreds of megabytes. Kept: the newest ``keep``, the clip's current file,
+    and the canonical cut everything else is derived from (deleting that one
+    would cost the fast path, not just the history). Returns the names removed.
+    """
+    keep = VERSION_HISTORY_KEEP if keep is None else keep
+    versions = _clip_versions(output_dir, base_name, clip_index)
+    canonical = f"{base_name}_clip_{clip_index + 1}.mp4"
+    protected = {canonical, os.path.basename(current or "")}
+    doomed = [v for v in versions[keep:] if v["file"] not in protected]
+    if not doomed:
+        return []
+    # A surviving version can be a restyle of a recut whose own file is going:
+    # its recipe sidecar is what brings that timeline back, so it outlives the
+    # video it was named for.
+    survivors = {v["file"] for v in versions} - {v["file"] for v in doomed}
+    needed_recipes = {v["recut"] for v in versions
+                      if v["file"] in survivors and v["recut"]}
+    removed = []
+    for v in doomed:
+        path = os.path.join(output_dir, v["file"])
+        sidecars = [f"{path}.poster.jpg"]
+        if v["file"] not in needed_recipes:
+            sidecars.append(f"{path}.recipe.json")
+        for target in [path, *sidecars]:
+            try:
+                os.remove(target)
+            except OSError:
+                continue
+        removed.append(v["file"])
+    return removed
+
+
+def _prune_job_versions(job_dir, keep=None):
+    """Prune every clip in one job's output directory."""
+    removed = []
+    for meta_path in glob.glob(os.path.join(job_dir, "*_metadata.json")):
+        try:
+            with open(meta_path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        base_name = os.path.basename(meta_path).replace("_metadata.json", "")
+        for i, clip in enumerate(data.get("shorts") or []):
+            current = (clip.get("video_url") or "").split("/")[-1]
+            removed += _prune_clip_versions(job_dir, base_name, i, current, keep)
+    return removed
+
+
 @app.get("/api/clip/{job_id}/{clip_index}/versions")
 async def get_clip_versions(job_id: str, clip_index: int):
     output_dir = os.path.join(OUTPUT_DIR, os.path.basename(job_id))
@@ -3435,7 +3497,9 @@ async def get_clip_versions(job_id: str, clip_index: int):
         v["current"] = v["file"] == current
         v["video_url"] = f"/videos/{job_id}/{v['file']}"
         v["poster_url"] = f"/api/clip/{job_id}/{clip_index}/poster/{v['file']}"
-    return {"versions": versions, "current": current}
+    return {"versions": versions, "current": current,
+            "keep": VERSION_HISTORY_KEEP,
+            "bytes": sum(v["bytes"] for v in versions)}
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/poster/{file}")

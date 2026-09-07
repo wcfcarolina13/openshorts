@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   compileSegments, parseRecipe, sourceToRendered, totalDuration, MIN_SEGMENT_SECONDS,
+  SPEED_MIN, SPEED_MAX,
 } from './timelineEdits.js';
 
 const base = [{ start: 0, end: 20.957 }];
@@ -80,7 +81,7 @@ test('parseRecipe inverts compileSegments', () => {
 
 test('parseRecipe keeps trims as separate base ranges', () => {
   const parsed = parseRecipe([{ start: 2, end: 8 }, { start: 12, end: 20 }]);
-  assert.deepEqual(parsed, { base: [{ start: 2, end: 8 }, { start: 12, end: 20 }], edits: [] });
+  assert.deepEqual(parsed, { base: [{ start: 2, end: 8 }, { start: 12, end: 20 }], edits: [], globalSpeed: 1 });
 });
 
 test('totalDuration and sourceToRendered follow the timeline', () => {
@@ -110,4 +111,65 @@ test('renderedToSource inverts sourceToRendered and maps inserts to their anchor
   near(renderedToSource(sourceToRendered(17.39, segs), segs), 17.39);
   near(renderedToSource(15.68 + 0.1 + 5.7 + 0.5, segs), 19.1); // inside the image
   near(renderedToSource(sourceToRendered(20, segs), segs), 20);
+});
+
+test('a global speed slows every source piece and nothing else', () => {
+  const segs = compileSegments(base, [
+    { id: 'p', type: 'pause', at: 10, ms: 100 },
+    { id: 'i', type: 'insert', at: 10, kind: 'image', src: 'logo.png', ms: 1200 },
+  ], 0.5);
+  assert.deepEqual(segs, [
+    { start: 0, end: 10, speed: 0.5 },
+    { kind: 'hold', at: 10, ms: 100 },
+    { kind: 'image', src: 'logo.png', ms: 1200 },
+    { start: 10, end: 20.957, speed: 0.5 },
+  ]);
+});
+
+test('a global speed of 1 leaves the segments untouched', () => {
+  assert.deepEqual(compileSegments(base, [], 1), [{ start: 0, end: 20.957 }]);
+});
+
+test('a section slow multiplies with the global speed', () => {
+  const segs = compileSegments(base, [
+    { id: 's', type: 'slow', from: 5, to: 10, factor: 0.5 },
+  ], 0.5);
+  assert.deepEqual(segs, [
+    { start: 0, end: 5, speed: 0.5 },
+    { start: 5, end: 10, speed: 0.25 },
+    { start: 10, end: 20.957, speed: 0.5 },
+  ]);
+});
+
+test('the product of global and section speed is clamped to what recut accepts', () => {
+  const slow = compileSegments(base, [{ id: 's', type: 'slow', from: 5, to: 10, factor: 0.5 }], 0.25);
+  assert.equal(slow[1].speed, SPEED_MIN);
+  const fast = compileSegments(base, [{ id: 's', type: 'slow', from: 5, to: 10, factor: 2 }], 4);
+  assert.equal(fast[1].speed, SPEED_MAX);
+});
+
+test('global speed stretches the total duration', () => {
+  const half = compileSegments(base, [], 0.5);
+  assert.ok(Math.abs(totalDuration(half) - 20.957 * 2) < 1e-3, totalDuration(half));
+});
+
+test('parseRecipe recovers a global speed when every source segment shares it', () => {
+  const segs = compileSegments(base, [{ id: 'p', type: 'pause', at: 10, ms: 100 }], 0.5);
+  const parsed = parseRecipe(segs);
+  assert.equal(parsed.globalSpeed, 0.5);
+  assert.deepEqual(parsed.base, [{ start: 0, end: 20.957 }]);
+  assert.deepEqual(parsed.edits.map((e) => e.type), ['pause']);
+});
+
+test('parseRecipe round-trips a globally slowed clip', () => {
+  const segs = compileSegments(base, [{ id: 'p', type: 'pause', at: 10, ms: 100 }], 0.5);
+  const parsed = parseRecipe(segs);
+  assert.deepEqual(compileSegments(parsed.base, parsed.edits, parsed.globalSpeed), segs);
+});
+
+test('mixed speeds stay section slows at global 1, so the render is unchanged', () => {
+  const segs = compileSegments(base, [{ id: 's', type: 'slow', from: 5, to: 10, factor: 0.5 }], 1);
+  const parsed = parseRecipe(segs);
+  assert.equal(parsed.globalSpeed, 1);
+  assert.deepEqual(compileSegments(parsed.base, parsed.edits, parsed.globalSpeed), segs);
 });

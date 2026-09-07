@@ -9,6 +9,7 @@ import { getApiUrl } from '../config';
 // a restored timeline recut brings its edit list back with it.
 export default function VersionsModal({ isOpen, onClose, jobId, clipIndex, onRestored }) {
     const [versions, setVersions] = useState(null);
+    const [budget, setBudget] = useState(null);
     const [error, setError] = useState(null);
     const [busy, setBusy] = useState(null);
 
@@ -16,6 +17,7 @@ export default function VersionsModal({ isOpen, onClose, jobId, clipIndex, onRes
         try {
             const d = await apiJson(`/api/clip/${jobId}/${clipIndex}/versions`);
             setVersions(d.versions || []);
+            setBudget({ keep: d.keep, bytes: d.bytes });
         } catch (e) {
             setError(e.message || 'could not load versions');
         }
@@ -90,7 +92,11 @@ export default function VersionsModal({ isOpen, onClose, jobId, clipIndex, onRes
                     ))}
                 </div>
             )}
-            <p className="text-[11px] text-muted mt-3">Restoring never deletes anything: the version you leave stays in this list. Versions follow the job's retention window.</p>
+            <p className="text-[11px] text-muted mt-3">
+                Restoring never deletes anything: the version you leave stays in this list.
+                {budget?.keep ? ` The newest ${budget.keep} are kept, plus the current one and the original — older ones are cleared to save disk.` : ''}
+                {budget?.bytes ? ` This clip's history is using ${(budget.bytes / 1e6).toFixed(0)} MB.` : ''}
+            </p>
         </Modal>
     );
 }
