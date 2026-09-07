@@ -3286,6 +3286,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         "clip_index": clip_index,
         "title": clip.get('video_title_for_youtube_short') or '',
         "segments": segments,
+        "kinds": list(recut.KINDS),
         "framing": (clip.get('recipe') or {}).get('framing') or 'auto',
         "canonical_range": canonical_range,
         "duration": total,
@@ -3300,6 +3301,9 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         },
         "limits": {
             "max_segments": recut.MAX_SEGMENTS,
+            "speed": [recut.SPEED_MIN, recut.SPEED_MAX],
+            "hold_ms": [recut.HOLD_MS_MIN, recut.HOLD_MS_MAX],
+            "image_ms": [recut.IMAGE_MS_MIN, recut.IMAGE_MS_MAX],
             "min_segment_seconds": recut.MIN_SEGMENT_SECONDS,
             "max_total_seconds": recut.MAX_TOTAL_SECONDS,
         },
@@ -3309,8 +3313,20 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
 
 
 class RerenderSegment(BaseModel):
-    start: float
-    end: float
+    """One recipe entry. Plain source ranges need start/end; the other kinds
+    (hold, image, clip) carry their own fields — recut.normalize_segments
+    validates per kind, so everything here is optional."""
+    kind: str = "source"
+    start: Optional[float] = None
+    end: Optional[float] = None
+    speed: Optional[float] = None
+    at: Optional[float] = None
+    ms: Optional[int] = None
+    src: Optional[str] = None
+    zoom: Optional[bool] = None
+
+    def as_dict(self):
+        return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
 class RerenderRequest(BaseModel):
@@ -3396,9 +3412,10 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     force_strategy = _FRAMING_STRATEGIES[framing]
 
     try:
+        assets_dir = _assets_dir(req.job_id)
         segments = recut.normalize_segments(
-            [{"start": s.start, "end": s.end} for s in req.segments],
-            source_duration)
+            [s.as_dict() for s in req.segments], source_duration,
+            assets_dir=assets_dir)
         if req.snap_to_words:
             snap_bound = source_duration or max(s['end'] for s in segments)
             segments = recut.snap_segments(segments, transcript, snap_bound)
@@ -3407,14 +3424,17 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                 # the canonical range; without a source the fast path is the
                 # only path, so clamp back instead of failing with a 409.
                 segments = [
-                    {"start": round(max(s['start'], canonical_range['start']), 3),
-                     "end": round(min(s['end'], canonical_range['end']), 3)}
+                    ({"start": round(max(s['start'], canonical_range['start']), 3),
+                      "end": round(min(s['end'], canonical_range['end']), 3),
+                      **({"speed": s["speed"]} if s.get("speed") else {})}
+                     if recut.segment_kind(s) == "source" else s)
                     for s in segments]
             # Re-validate after snapping/clamping: a segment fully outside the
             # canonical range clamps to an inverted (end < start) window, and
             # snapping can stretch the total past the cap. Without this it
             # reaches ffmpeg and dies as a 500 instead of a clean 400.
-            segments = recut.normalize_segments(segments, source_duration)
+            segments = recut.normalize_segments(segments, source_duration,
+                                                assets_dir=assets_dir)
     except recut.RecutError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -3424,6 +3444,14 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             and os.path.exists(canonical_path)
             and recut.within_range(segments, canonical_range['start'],
                                    canonical_range['end']))
+    if recut.needs_fast_path(segments) and not fast:
+        # Inserts are already 9:16 and speed is applied per part, so they are
+        # cut from the canonical (framed) file only — see the timeline-edits spec.
+        raise HTTPException(
+            status_code=400,
+            detail=("holds, inserts and speed changes are cut from the original "
+                    "clip file, so every source segment must stay inside the "
+                    "original clip range and the file must still be on the server"))
     if not fast and not source_path:
         raise HTTPException(
             status_code=409,
@@ -3448,7 +3476,8 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                 segments=recut.rebase_segments(
                     segments, canonical_range['start'], canonical_range['end']),
                 output_dir=output_dir, clean_name=clean_name,
-                reframe=False, captions_transcript=v_transcript)
+                reframe=False, captions_transcript=v_transcript,
+                assets_dir=assets_dir)
         return recut.perform_recut(
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
@@ -3469,8 +3498,9 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
         # Covering range, deliberately not segments[0]/segments[-1]: segments
         # may legally be out of source order, and downstream consumers only
         # need a sane positive window (the recipe is the real timeline).
-        new_start = min(s['start'] for s in segments)
-        new_end = max(s['end'] for s in segments)
+        sources = recut.source_segments(segments) or [canonical_range]
+        new_start = min(s['start'] for s in sources)
+        new_end = max(s['end'] for s in sources)
 
         updates = {'video_url': new_video_url, 'start': new_start,
                    'end': new_end, 'recipe': new_recipe,

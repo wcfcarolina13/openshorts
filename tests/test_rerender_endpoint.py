@@ -343,3 +343,50 @@ class TestMcpTool:
         names = [t["name"] for t in mcp_server.TOOLS]
         assert "recut_clip" in names
         assert "recut_clip" in mcp_server._TOOL_IMPLS
+
+
+class TestRerenderKinds:
+    def test_edl_advertises_kinds_and_limits(self, job):
+        data = _request("GET", f"/api/clip/{JOB_ID}/0/edl").json()
+        assert data["kinds"] == ["source", "hold", "image", "clip"]
+        assert data["limits"]["hold_ms"] == [40, 3000]
+        assert data["limits"]["speed"] == [0.25, 4.0]
+
+    def test_hold_and_image_take_the_fast_path_with_assets(self, job, fake_recut):
+        assets = job["dir"] / "assets"
+        assets.mkdir()
+        (assets / "logo.png").write_bytes(b"x")
+        resp = _request("POST", "/api/clip/rerender", {
+            "job_id": JOB_ID, "clip_index": 0,
+            "segments": [{"start": 10, "end": 20},
+                         {"kind": "hold", "at": 20, "ms": 100},
+                         {"kind": "image", "src": "logo.png", "ms": 1000, "zoom": True},
+                         {"start": 20, "end": 25, "speed": 0.5}]})
+        assert resp.status_code == 200, resp.text
+        call = fake_recut[0]
+        assert call["input_path"].endswith("mytitle_clip_1.mp4")   # canonical = fast
+        assert call["assets_dir"] == str(assets)
+        assert call["segments"] == [
+            {"start": 0.0, "end": 10.0},
+            {"kind": "hold", "at": 10.0, "ms": 100},
+            {"kind": "image", "src": "logo.png", "ms": 1000, "zoom": True},
+            {"start": 10.0, "end": 15.0, "speed": 0.5}]
+        meta = json.loads(job["meta_path"].read_text())
+        recipe = meta["shorts"][0]["recipe"]
+        assert recipe["segments"][1] == {"kind": "hold", "at": 20.0, "ms": 100}
+        # Covering source window ignores inserts.
+        assert (meta["shorts"][0]["start"], meta["shorts"][0]["end"]) == (10.0, 25.0)
+
+    def test_kinds_outside_canonical_range_400(self, job, fake_recut):
+        resp = _request("POST", "/api/clip/rerender", {
+            "job_id": JOB_ID, "clip_index": 0,
+            "segments": [{"start": 5, "end": 20}, {"kind": "hold", "at": 20, "ms": 100}]})
+        assert resp.status_code == 400
+        assert "original clip" in resp.json()["detail"]
+
+    def test_unknown_asset_400(self, job, fake_recut):
+        resp = _request("POST", "/api/clip/rerender", {
+            "job_id": JOB_ID, "clip_index": 0,
+            "segments": [{"start": 10, "end": 20},
+                         {"kind": "image", "src": "missing.png", "ms": 1000}]})
+        assert resp.status_code == 400
