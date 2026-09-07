@@ -40,6 +40,13 @@ SPEED_MIN, SPEED_MAX = 0.25, 4.0
 # Inline overlays: box width as a fraction of the frame's width. Anything
 # under 5 % is a speck; 100 % is the whole frame, which is what "fill" is for.
 OVERLAY_W_MIN, OVERLAY_W_MAX = 0.05, 1.0
+# How an inline overlay arrives and leaves, and what it does in between.
+# Everything here is either an overlay x/y expression (free, evaluated per
+# frame) or the fade filter — nothing needs a second scaler.
+OVERLAY_TRANSITIONS = ("cut", "fade", "slide")
+OVERLAY_MOTIONS = ("none", "bounce", "float", "shake")
+# Long enough to read, short enough not to eat a two-second overlay.
+OVERLAY_TRANSITION_SECONDS = 0.35
 HOLD_MS_MIN, HOLD_MS_MAX = 40, 3000
 IMAGE_MS_MIN, IMAGE_MS_MAX = 200, 10000
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -153,26 +160,120 @@ def _overlay(seg, i, assets_dir):
             raise RecutError(f"segment {i + 1}: overlay {key} must be a number")
         return round(min(high, max(low, value)), 4)
 
-    return {"src": os.path.basename(path),
-            "x": frac("x", 0.0, 1.0, 0.0),
-            "y": frac("y", 0.0, 1.0, 0.0),
-            "w": frac("w", OVERLAY_W_MIN, OVERLAY_W_MAX, 0.25)}
+    def choice(key, allowed):
+        value = raw.get(key)
+        if value is None:
+            return allowed[0]
+        value = str(value)
+        if value not in allowed:
+            raise RecutError(
+                f"segment {i + 1}: overlay {key} must be one of {', '.join(allowed)}")
+        return value
+
+    out = {"src": os.path.basename(path),
+           "x": frac("x", 0.0, 1.0, 0.0),
+           "y": frac("y", 0.0, 1.0, 0.0),
+           "w": frac("w", OVERLAY_W_MIN, OVERLAY_W_MAX, 0.25)}
+    # Only non-default effects are stored, so a plain overlay's recipe stays
+    # the three numbers it always was.
+    for key, allowed in (("in", OVERLAY_TRANSITIONS), ("out", OVERLAY_TRANSITIONS),
+                         ("motion", OVERLAY_MOTIONS)):
+        picked = choice(key, allowed)
+        if picked != allowed[0]:
+            out[key] = picked
+    return out
 
 
-def _overlay_input_args(path):
-    """Input flags that make an inline overlay repeat for the whole window.
+def _overlay_loops(path):
+    """True when the overlay carries its own motion and must be told to repeat."""
+    ext = os.path.splitext(path)[1].lower()
+    return ext == ".gif" or ext in VIDEO_EXTENSIONS
 
-    Empty for a still — overlay's own eof_action=repeat already holds a
-    one-frame input. An endless input does NOT end when the footage does (a
-    real render ran to 85 MB before it was killed), so every overlay part
-    carries an explicit ``-t`` of the footage's own length.
+
+def _overlay_input_args(path, fps, duration, needs_clock=False):
+    """Input flags for the overlay's own stream.
+
+    A still normally needs none: overlay's eof_action=repeat holds a one-frame
+    input for free. But a held frame's PTS never advances, so a time-based
+    filter on that stream reads t=0 forever — a fade rendered the overlay
+    permanently invisible until this was found in a real render. When effects
+    need a clock, the still is looped into a real timeline instead.
+
+    An endless input does NOT end when the footage does (a real render ran to
+    85 MB before it was killed), so every overlay part carries an explicit
+    ``-t`` of the footage's own length.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".gif":
         return ["-ignore_loop", "0"]      # a GIF otherwise obeys its own loop count
     if ext in VIDEO_EXTENSIONS:
         return ["-stream_loop", "-1"]
+    if needs_clock:
+        return ["-loop", "1", "-framerate", f"{fps:g}", "-t", f"{duration:g}"]
     return []
+
+
+def _overlay_effects(overlay, width, height, duration):
+    """(extra filters for the overlay stream, x expression, y expression).
+
+    Motion and slides are overlay x/y expressions: ffmpeg re-evaluates them per
+    frame (overlay's default eval=frame), so they cost nothing and stay exact.
+    A fade is the one effect that needs a filter, and it needs an alpha channel
+    to fade out of — hence format=rgba, which a JPEG overlay would not have.
+
+    x/y are returned as ffmpeg expression strings; ``None`` means "no effects,
+    use the plain pixel form" so an unadorned overlay keeps its old command.
+    """
+    x0 = round(overlay["x"] * width)
+    y0 = round(overlay["y"] * height)
+    motion = overlay.get("motion", "none")
+    fade_in = overlay.get("in") == "fade"
+    fade_out = overlay.get("out") == "fade"
+    slide_in = overlay.get("in") == "slide"
+    slide_out = overlay.get("out") == "slide"
+    if motion == "none" and not (fade_in or fade_out or slide_in or slide_out):
+        return [], None, None
+
+    # An effect must never outlast the overlay: a 0.35 s entrance on a 0.6 s
+    # overlay would still be arriving as it left.
+    span = min(OVERLAY_TRANSITION_SECONDS, max(0.05, duration / 3.0))
+    xs, ys = [str(x0)], [str(y0)]
+
+    if motion == "bounce":
+        ys.append("-overlay_h*0.12*abs(sin(2*PI*t*1.4))")
+    elif motion == "float":
+        ys.append("+overlay_h*0.06*sin(2*PI*t*0.5)")
+    elif motion == "shake":
+        xs.append("+overlay_w*0.03*sin(2*PI*t*9)")
+
+    if slide_in or slide_out:
+        # Come from (and leave toward) whichever frame edge is nearest, so a
+        # badge in the top-right slides in from the right, not across the face.
+        edges = {"left": x0, "right": width - x0, "top": y0, "bottom": height - y0}
+        edge = min(edges, key=edges.get)
+        axis, sign, offset = {
+            "left": ("x", "-", f"({x0}+overlay_w)"),
+            "right": ("x", "+", f"({width}-{x0})"),
+            "top": ("y", "-", f"({y0}+overlay_h)"),
+            "bottom": ("y", "+", f"({height}-{y0})"),
+        }[edge]
+        target = xs if axis == "x" else ys
+        # x/y go into the graph single-quoted, so the commas inside max() need
+        # no backslash — an escaped comma would reach the expression parser.
+        if slide_in:
+            target.append(f"{sign}{offset}*max(0,1-t/{span:g})")
+        if slide_out:
+            leave = max(0.0, duration - span)
+            target.append(f"{sign}{offset}*max(0,(t-{leave:g})/{span:g})")
+
+    chain = []
+    if fade_in or fade_out:
+        chain.append("format=rgba")
+        if fade_in:
+            chain.append(f"fade=t=in:st=0:d={span:g}:alpha=1")
+        if fade_out:
+            chain.append(f"fade=t=out:st={max(0.0, duration - span):g}:d={span:g}:alpha=1")
+    return chain, "".join(xs), "".join(ys)
 
 
 def normalize_segments(segments, source_duration=None, assets_dir=None):
@@ -494,19 +595,29 @@ def cut_commands(input_path, segments, part_paths, assets_dir=None, media=None):
                 # yuv420p, and PTS-STARTPTS keeps a looped input's timestamps
                 # aligned with the footage's.
                 ov_path = asset_path(assets_dir, overlay["src"])
-                loop_args = _overlay_input_args(ov_path)
-                cmd += [*loop_args, "-i", ov_path]
+                seconds = segment_duration(seg)
+                effects, x_expr, y_expr = _overlay_effects(
+                    overlay, width, height, seconds)
+                # Only a fade reads the overlay stream's own clock; motion and
+                # slides are overlay x/y expressions against the FOOTAGE's t.
+                cmd += [*_overlay_input_args(ov_path, fps, seconds,
+                                             needs_clock=bool(effects)),
+                        "-i", ov_path]
                 base = (f"setpts=PTS/{speed:g},fps={fps:g}" if speed != 1.0
                         else f"fps={fps:g}")
-                reset = "setpts=PTS-STARTPTS," if loop_args else ""
+                reset = "setpts=PTS-STARTPTS," if _overlay_loops(ov_path) else ""
+                extra = "".join(f",{f}" for f in effects)
+                place = (f"x='{x_expr}':y='{y_expr}'" if x_expr is not None
+                         else f"{round(overlay['x'] * width)}:"
+                              f"{round(overlay['y'] * height)}")
                 fc = (f"[0:v]{base}[base];"
-                      f"[1:v]{reset}scale={max(2, round(overlay['w'] * width))}:-2[ov];"
-                      f"[base][ov]overlay={round(overlay['x'] * width)}:"
-                      f"{round(overlay['y'] * height)}[v]")
+                      f"[1:v]{reset}scale={max(2, round(overlay['w'] * width))}:-2"
+                      f"{extra}[ov];"
+                      f"[base][ov]overlay={place}[v]")
                 # -t is what bounds the part: a looped overlay input never
                 # ends on its own, so without it ffmpeg encodes forever.
                 cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a",
-                        "-t", f"{segment_duration(seg):g}",
+                        "-t", f"{seconds:g}",
                         *video_encode_args(QUALITY_FAST)]
                 if speed != 1.0:
                     af = ",".join(f for f in (_atempo_chain(speed), _loudnorm()) if f)

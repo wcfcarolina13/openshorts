@@ -78,6 +78,38 @@ own soundtrack.
 Durations do not change, so `virtual_transcript` and the caption re-timing
 need no changes at all.
 
+## Effects
+
+Three optional fields, each defaulting to "do nothing" and each left out of
+the recipe when it is the default:
+
+| field | values | what it costs |
+|---|---|---|
+| `in` / `out` | `cut`, `fade`, `slide` | `fade` adds `format=rgba` + `fade`; `slide` is free |
+| `motion` | `none`, `bounce`, `float`, `shake` | free |
+
+**Motion and slides are overlay x/y expressions.** `overlay` re-evaluates them
+per frame by default, and they can reference `overlay_w`/`overlay_h`, so the
+box's real size never has to be known when the command is built. A slide comes
+from whichever frame edge is nearest, so a badge in the corner arrives from
+outside rather than across the speaker's face. The expressions go into the
+graph single-quoted, because the commas inside `max()` would otherwise end the
+filter early.
+
+**A fade needs the overlay's own clock, and a still does not have one.** A
+still overlay is normally held by `eof_action=repeat` for free — but a held
+frame's PTS never advances, so `fade` read `t=0` forever and the overlay stayed
+completely invisible. When a fade is requested, a still is instead looped into
+a real timeline (`-loop 1 -framerate <fps> -t <duration>`). GIFs and videos
+already advance and need nothing.
+
+Transition length is `min(0.35 s, duration/3)`, so a 0.35 s entrance can never
+still be arriving as a short overlay leaves.
+
+No `pop` or `explode`: animating scale needs a per-frame scaler, and `zoompan`
+— the only candidate — does not carry alpha, which is the one thing an overlay
+cannot lose.
+
 ## Editing
 
 The playhead sets where the overlay starts; it runs for a duration the editor

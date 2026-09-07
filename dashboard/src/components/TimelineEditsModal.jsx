@@ -10,6 +10,7 @@ import { apiFetch, apiJson } from '../lib/api';
 import {
     compileSegments, parseRecipe, sourceToRendered, renderedToSource, totalDuration,
     SPEED_MIN, SPEED_MAX, MAX_TOTAL_SECONDS, MIN_SEGMENT_SECONDS,
+    OVERLAY_TRANSITIONS, OVERLAY_MOTIONS,
 } from '../lib/timelineEdits';
 
 // "Super easy" timeline edits: pick a moment on the clip, then pause there,
@@ -28,8 +29,11 @@ const SPEED_STEP = 0.05;
 const OVERLAY_W_MIN = 0.05;
 const OVERLAY_W_MAX = 1;
 const OVERLAY_DEFAULT = { x: 0.06, y: 0.72, w: 0.28 };
-// An emoji reads at a glance, so it wants a smaller box than a logo does.
-const EMOJI_DEFAULT = { x: 0.7, y: 0.08, w: 0.18 };
+// An emoji reads at a glance, so it wants a smaller box than a logo does —
+// and a hard cut on something that small looks like a glitch, so it fades.
+const EMOJI_DEFAULT = { x: 0.7, y: 0.08, w: 0.18, in: 'fade', out: 'fade' };
+// 'none' is the honest value in the recipe; 'still' is the honest word for it.
+const MOTION_LABEL = { none: 'still', bounce: 'bounce', float: 'float', shake: 'shake' };
 const SNAP = 0.02;
 const snapTo = (value, targets) => {
     const hit = targets.find((t) => Math.abs(value - t) < SNAP);
@@ -813,6 +817,27 @@ export default function TimelineEditsModal({ isOpen, onClose, jobId, clipIndex, 
                                                         className="flex-1 accent-brass" />
                                                     <span className="readout w-10 text-right">{Math.round(e.w * 100)}%</span>
                                                 </label>
+                                                <div className="flex items-center gap-1 flex-wrap">
+                                                    <span className="text-muted w-14">appears</span>
+                                                    {OVERLAY_TRANSITIONS.map((t) => (
+                                                        <button key={t} onClick={() => patchEdit(e.id, { in: t })}
+                                                            className={(e.in || OVERLAY_TRANSITIONS[0]) === t ? CHIP_BTN_ON : CHIP_BTN}>{t}</button>
+                                                    ))}
+                                                </div>
+                                                <div className="flex items-center gap-1 flex-wrap">
+                                                    <span className="text-muted w-14">leaves</span>
+                                                    {OVERLAY_TRANSITIONS.map((t) => (
+                                                        <button key={t} onClick={() => patchEdit(e.id, { out: t })}
+                                                            className={(e.out || OVERLAY_TRANSITIONS[0]) === t ? CHIP_BTN_ON : CHIP_BTN}>{t}</button>
+                                                    ))}
+                                                </div>
+                                                <div className="flex items-center gap-1 flex-wrap">
+                                                    <span className="text-muted w-14">while on</span>
+                                                    {OVERLAY_MOTIONS.map((m) => (
+                                                        <button key={m} onClick={() => patchEdit(e.id, { motion: m })}
+                                                            className={(e.motion || OVERLAY_MOTIONS[0]) === m ? CHIP_BTN_ON : CHIP_BTN}>{MOTION_LABEL[m]}</button>
+                                                    ))}
+                                                </div>
                                                 <p className="text-[11px] text-muted">
                                                     drag its band on the timeline to retime it, or an edge to trim.{' '}
                                                     {playhead >= e.from && playhead <= e.to

@@ -235,3 +235,55 @@ test('two different overlays stay two edits', () => {
   ]);
   assert.equal(parseRecipe(segs).edits.filter((e) => e.type === 'overlay').length, 2);
 });
+
+test('overlay effects reach the recipe, and defaults stay out of it', () => {
+  const base = [{ start: 0, end: 10 }];
+  const plain = compileSegments(base, [{
+    id: 'a', type: 'overlay', from: 2, to: 5, src: 'logo.png', x: 0.1, y: 0.2, w: 0.3,
+    in: 'cut', out: 'cut', motion: 'none',
+  }]);
+  assert.deepEqual(plain[1].overlay, { src: 'logo.png', x: 0.1, y: 0.2, w: 0.3 });
+
+  const fancy = compileSegments(base, [{
+    id: 'a', type: 'overlay', from: 2, to: 5, src: 'logo.png', x: 0.1, y: 0.2, w: 0.3,
+    in: 'fade', out: 'slide', motion: 'bounce',
+  }]);
+  assert.deepEqual(fancy[1].overlay, {
+    src: 'logo.png', x: 0.1, y: 0.2, w: 0.3, in: 'fade', out: 'slide', motion: 'bounce',
+  });
+});
+
+test('parseRecipe brings the effects back', () => {
+  const overlay = { src: 'logo.png', x: 0.1, y: 0.2, w: 0.3, in: 'fade', motion: 'shake' };
+  const { edits } = parseRecipe([
+    { start: 0, end: 2 },
+    { start: 2, end: 5, overlay },
+    { start: 5, end: 10 },
+  ]);
+  const o = edits.find((e) => e.type === 'overlay');
+  assert.equal(o.from, 2);
+  assert.equal(o.to, 5);
+  assert.equal(o.in, 'fade');
+  assert.equal(o.motion, 'shake');
+});
+
+test('two overlays that differ only in their effects stay two edits', () => {
+  const { edits } = parseRecipe([
+    { start: 0, end: 2, overlay: { src: 'a.png', x: 0, y: 0, w: 0.2, motion: 'bounce' } },
+    { start: 2, end: 4, overlay: { src: 'a.png', x: 0, y: 0, w: 0.2 } },
+  ]);
+  assert.equal(edits.filter((e) => e.type === 'overlay').length, 2);
+});
+
+test('an edit round-trips through compile and parse with its effects intact', () => {
+  const base = [{ start: 0, end: 10 }];
+  const edit = {
+    id: 'a', type: 'overlay', from: 2, to: 5, src: 'logo.png', x: 0.1, y: 0.2, w: 0.3,
+    in: 'slide', out: 'fade', motion: 'float',
+  };
+  const { edits } = parseRecipe(compileSegments(base, [edit]));
+  const o = edits.find((e) => e.type === 'overlay');
+  for (const k of ['from', 'to', 'src', 'x', 'y', 'w', 'in', 'out', 'motion']) {
+    assert.equal(o[k], edit[k], `${k} survived the round trip`);
+  }
+});

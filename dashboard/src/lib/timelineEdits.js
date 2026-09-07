@@ -11,6 +11,10 @@ export const MIN_SEGMENT_SECONDS = 0.5;
 export const SPEED_MIN = 0.25;
 export const SPEED_MAX = 4;
 export const MAX_TOTAL_SECONDS = 180;
+// Mirrors recut.py. The first entry of each list is the default, and a default
+// is left out of the recipe so a plain overlay stays the three numbers it was.
+export const OVERLAY_TRANSITIONS = ['cut', 'fade', 'slide'];
+export const OVERLAY_MOTIONS = ['none', 'bounce', 'float', 'shake'];
 
 const round3 = (x) => Math.round(x * 1000) / 1000;
 const clampSpeed = (x) => Math.min(SPEED_MAX, Math.max(SPEED_MIN, round3(x)));
@@ -102,7 +106,15 @@ export function compileSegments(baseSegments, edits, globalSpeed = 1) {
     // compositing order the editor has no way to express, so the first wins.
     const overlayAt = (mid) => {
       const o = edits.find((e) => e.type === 'overlay' && mid > e.from && mid < e.to);
-      return o ? { src: o.src, x: o.x, y: o.y, w: o.w } : null;
+      if (!o) return null;
+      // Listed field by field on purpose: an edit also carries id/type/from/to,
+      // which must never reach the recipe. Anything added to an overlay has to
+      // be added HERE too, or it is dropped in silence.
+      const box = { src: o.src, x: o.x, y: o.y, w: o.w };
+      if (o.in && o.in !== OVERLAY_TRANSITIONS[0]) box.in = o.in;
+      if (o.out && o.out !== OVERLAY_TRANSITIONS[0]) box.out = o.out;
+      if (o.motion && o.motion !== OVERLAY_MOTIONS[0]) box.motion = o.motion;
+      return box;
     };
     // items: source pieces interleaved with the events anchored at each point.
     const items = [];
@@ -170,9 +182,12 @@ export function parseRecipe(segments) {
       else base.push({ start: seg.start, end: seg.end });
       if (seg.overlay) {
         const prev = edits.filter((e) => e.type === 'overlay').pop();
+        const same = (k, d) => (prev?.[k] ?? d) === (seg.overlay[k] ?? d);
         if (prev && prev.to === seg.start && prev.src === seg.overlay.src
             && prev.x === seg.overlay.x && prev.y === seg.overlay.y
-            && prev.w === seg.overlay.w) prev.to = seg.end;
+            && prev.w === seg.overlay.w
+            && same('in', OVERLAY_TRANSITIONS[0]) && same('out', OVERLAY_TRANSITIONS[0])
+            && same('motion', OVERLAY_MOTIONS[0])) prev.to = seg.end;
         else edits.push({ id: newId(), type: 'overlay', from: seg.start, to: seg.end, ...seg.overlay });
       }
       if (seg.speed && seg.speed !== 1 && globalSpeed === 1) {

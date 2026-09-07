@@ -703,12 +703,17 @@ class TestInlineOverlays:
         segs = [{"start": 1, "end": 3, "overlay": {"src": "logo.png", "x": 0, "y": 0, "w": 0.3}}]
         assert recut.total_duration(segs) == 2.0
 
-    def _overlay_cmd(self, tmp_path, name, **seg):
+    def _asset(self, tmp_path, name):
         (tmp_path / name).write_bytes(b"x")
+        return tmp_path
+
+    def _overlay_cmd(self, tmp_path, name, overlay_extra=None, **seg):
+        self._asset(tmp_path, name)
         return recut.cut_commands(
             "in.mp4",
             [{"start": 1, "end": 3,
-              "overlay": {"src": name, "x": 0, "y": 0, "w": 0.25}, **seg}],
+              "overlay": {"src": name, "x": 0, "y": 0, "w": 0.25, **(overlay_extra or {})},
+              **seg}],
             ["p0.mp4"], assets_dir=str(tmp_path), media=MEDIA)[0]
 
     def test_every_overlay_part_is_bounded_by_the_footage_under_it(self, tmp_path):
@@ -755,6 +760,99 @@ class TestInlineOverlays:
         fc = cmd[cmd.index("-filter_complex") + 1]
         assert "[0:v]setpts=PTS/0.5,fps=30[base]" in fc
         assert "[1:v]setpts=PTS-STARTPTS,scale=270:-2[ov]" in fc
+
+    # ---- effects -------------------------------------------------------
+
+    def test_a_plain_overlay_records_no_effects(self, tmp_path):
+        """Defaults stay out of the recipe, so an unadorned overlay is still
+        the three numbers it always was."""
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"start": 1, "end": 3, "overlay": {"src": "logo.png", "w": 0.25,
+                                                "in": "cut", "out": "cut", "motion": "none"}}],
+            assets_dir=str(tmp_path))
+        assert set(segs[0]["overlay"]) == {"src", "x", "y", "w"}
+
+    def test_effects_are_recorded_when_they_are_not_the_default(self, tmp_path):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        segs = recut.normalize_segments(
+            [{"start": 1, "end": 3, "overlay": {"src": "logo.png", "w": 0.25,
+                                                "in": "fade", "out": "slide", "motion": "bounce"}}],
+            assets_dir=str(tmp_path))
+        assert segs[0]["overlay"]["in"] == "fade"
+        assert segs[0]["overlay"]["out"] == "slide"
+        assert segs[0]["overlay"]["motion"] == "bounce"
+
+    @pytest.mark.parametrize("key,value", [
+        ("in", "explode"), ("out", "wipe"), ("motion", "cartwheel")])
+    def test_an_unknown_effect_is_refused_by_name(self, tmp_path, key, value):
+        (tmp_path / "logo.png").write_bytes(b"x")
+        with pytest.raises(recut.RecutError, match=f"overlay {key} must be one of"):
+            recut.normalize_segments(
+                [{"start": 1, "end": 3,
+                  "overlay": {"src": "logo.png", "w": 0.25, key: value}}],
+                assets_dir=str(tmp_path))
+
+    def test_a_faded_still_is_given_a_real_clock(self, tmp_path):
+        """overlay's eof_action=repeat holds one frame, whose PTS never moves —
+        so fade would read t=0 forever and the overlay would never appear."""
+        cmd = self._overlay_cmd(tmp_path, "logo.png", overlay_extra={"in": "fade"})
+        assert cmd[8:14] == ["-loop", "1", "-framerate", "30", "-t", "2"]
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "format=rgba,fade=t=in:st=0:d=0.35:alpha=1" in fc
+
+    def test_a_still_without_effects_keeps_the_cheap_held_frame(self, tmp_path):
+        cmd = self._overlay_cmd(tmp_path, "logo.png")
+        assert "-loop" not in cmd and "format=rgba" not in cmd[cmd.index("-filter_complex") + 1]
+
+    def test_a_gif_needs_no_extra_clock_it_already_moves(self, tmp_path):
+        cmd = self._overlay_cmd(tmp_path, "wave.gif", overlay_extra={"in": "fade"})
+        assert cmd[8:10] == ["-ignore_loop", "0"]
+        assert "-loop" not in cmd
+
+    def test_a_short_overlay_shortens_its_own_transition(self, tmp_path):
+        """A 0.35 s entrance on a 0.6 s overlay would still be arriving as it
+        left, so the effect is capped at a third of the window."""
+        effects, _, _ = recut._overlay_effects(
+            {"x": 0.5, "y": 0.5, "w": 0.2, "in": "fade"}, 1080, 1920, 0.6)
+        assert "d=0.2" in effects[1]
+
+    def test_motion_is_an_overlay_expression_not_a_filter(self, tmp_path):
+        """Motion costs nothing: it is evaluated per frame by overlay itself."""
+        cmd = self._overlay_cmd(tmp_path, "logo.png", overlay_extra={"motion": "bounce"})
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "overlay_h*0.12*abs(sin(2*PI*t*1.4))" in fc
+        assert "fade" not in fc and "-loop" not in cmd
+
+    def test_a_slide_comes_from_the_nearest_edge(self, tmp_path):
+        # x=0.9 of 1080 is 108 px from the right and 972 from the left, and it
+        # sits mid-frame vertically: the right edge wins.
+        _, x_expr, y_expr = recut._overlay_effects(
+            {"x": 0.9, "y": 0.5, "w": 0.2, "in": "slide"}, 1080, 1920, 3.0)
+        assert x_expr.startswith("972+(1080-972)*max(0,1-t/0.35)")
+        assert y_expr == "960"
+
+    def test_a_slide_from_the_top_moves_y_not_x(self, tmp_path):
+        _, x_expr, y_expr = recut._overlay_effects(
+            {"x": 0.5, "y": 0.02, "w": 0.2, "in": "slide"}, 1080, 1920, 3.0)
+        assert x_expr == "540"
+        assert y_expr.startswith("38-(38+overlay_h)*max(0,1-t/0.35)")
+
+    def test_expressions_are_quoted_so_their_commas_survive(self, tmp_path):
+        """A bare comma inside max() would end the filter early."""
+        cmd = self._overlay_cmd(tmp_path, "logo.png", overlay_extra={"in": "slide"})
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "overlay=x='" in fc and ":y='" in fc
+        assert "\\," not in fc   # escaped inside quotes would reach the evaluator
+
+    def test_rebase_and_snap_carry_the_effects_too(self):
+        overlay = {"src": "logo.png", "x": 0.8, "y": 0.0, "w": 0.2,
+                   "in": "fade", "out": "slide", "motion": "bounce"}
+        out = recut.rebase_segments([{"start": 12.0, "end": 14.0, "overlay": overlay}], 10.0)
+        assert out[0]["overlay"] == overlay
+        snapped = recut.snap_segments(
+            [{"start": 12.0, "end": 14.0, "overlay": overlay}], TRANSCRIPT, 60.0)
+        assert snapped[0]["overlay"] == overlay
 
     def test_rebase_carries_the_overlay_onto_the_canonical_file(self):
         overlay = {"src": "logo.png", "x": 0.8, "y": 0.0, "w": 0.2}
