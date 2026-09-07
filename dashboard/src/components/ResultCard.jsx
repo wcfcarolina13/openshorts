@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, Clock, TrendingUp } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import SubtitleModal from './SubtitleModal';
@@ -36,7 +36,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+export default function ResultCard({ onTimelineEdit, clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -889,6 +889,17 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         >
                             <Crosshair size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
                             reframing
+                        </button>
+                    )}
+
+                    {onTimelineEdit && (
+                        <button
+                            onClick={() => onTimelineEdit(index)}
+                            className={QUIET_BTN}
+                            title="pause, slow down, or splice in media at a point in the clip"
+                        >
+                            <Clock size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
+                            timeline
                         </button>
                     )}
 

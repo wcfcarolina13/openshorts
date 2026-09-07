@@ -11,6 +11,8 @@ import SaaShortsTab from './components/SaaShortsTab';
 import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
+import TimelineEditsModal from './components/TimelineEditsModal';
+import { getApiUrl } from './config';
 import ReframeEditor from './components/ReframeEditor';
 import UsageMeter from './components/UsageMeter';
 import TopUpModal from './components/TopUpModal';
@@ -292,6 +294,7 @@ function App() {
   const [showScheduleWeek, setShowScheduleWeek] = useState(false);
   // Clip editor overlay: index of the clip being edited, or null.
   const [editingClip, setEditingClip] = useState(null);
+  const [timelineClip, setTimelineClip] = useState(null);
   const [reframingClip, setReframingClip] = useState(null);
 
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
@@ -1955,6 +1958,7 @@ function App() {
                           index={i}
                           jobId={jobId}
                           onEditClip={(index) => setEditingClip(index)}
+                          onTimelineEdit={(index) => setTimelineClip(index)}
                           onReframeClip={(index) => setReframingClip(index)}
                           initialState={projectState?.clips?.find((c) => c.index === i) || null}
                           onStateChange={handleClipStateChange}
@@ -2139,6 +2143,17 @@ function App() {
           clipIndex={editingClip}
           clipTitle={results.clips[editingClip].video_title_for_youtube_short || ''}
           onClose={() => setEditingClip(null)}
+          onRerendered={handleClipRerendered}
+        />
+      )}
+      {timelineClip !== null && results?.clips?.[timelineClip] && (
+        <TimelineEditsModal
+          isOpen
+          jobId={jobId}
+          clipIndex={timelineClip}
+          clipTitle={results.clips[timelineClip].video_title_for_youtube_short || ''}
+          videoUrl={getApiUrl(results.clips[timelineClip].video_url)}
+          onClose={() => setTimelineClip(null)}
           onRerendered={handleClipRerendered}
         />
       )}
